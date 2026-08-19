@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "Transcription Refinement replacement scope registry",
+  "description": "Skill-owned provenance metadata. ZeroType does not read this file.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/profile"
+      }
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/rule"
+      }
+    }
+  },
+  "required": [
+    "version",
+    "profiles",
+    "rules"
+  ],
+  "definitions": {
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transcription_engine": { "type": "string" },
+        "transcription_model": { "type": "string" },
+        "correction_model": { "type": "string" },
+        "first_seen": { "type": "string" },
+        "last_seen": { "type": "string" }
+      },
+      "required": [
+        "transcription_engine",
+        "transcription_model",
+        "correction_model",
+        "first_seen",
+        "last_seen"
+      ]
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fingerprint": { "type": "string" },
+        "target_section": { "type": "string" },
+        "rule_type": { "type": "string" },
+        "source_or_pattern": { "type": "string" },
+        "replacement": { "type": "string" },
+        "scope": { "type": "string" },
+        "target_file": { "type": "string" },
+        "observed_profiles": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "observed_recordings": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": [
+        "fingerprint",
+        "target_section",
+        "rule_type",
+        "source_or_pattern",
+        "replacement",
+        "scope",
+        "target_file",
+        "observed_profiles",
+        "observed_recordings"
+      ]
+    }
+  }
+}

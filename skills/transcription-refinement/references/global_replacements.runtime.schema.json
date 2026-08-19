@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "ZeroType runtime replacement file (observed object Regex format)",
+  "description": "Compatibility schema for the Regex object format emitted by the installed ZeroType editor. This is not the bundled official schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "FinalOutput": {
+      "$ref": "#/definitions/replacementSection"
+    },
+    "Transcription": {
+      "$ref": "#/definitions/replacementSection"
+    }
+  },
+  "required": [
+    "FinalOutput",
+    "Transcription"
+  ],
+  "definitions": {
+    "replacementSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "Literals": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "Regex": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "Pattern": {
+                "type": "string"
+              },
+              "Replacement": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "Pattern",
+              "Replacement"
+            ]
+          }
+        }
+      },
+      "required": [
+        "Literals",
+        "Regex"
+      ]
+    }
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Transcription Refinement"
+  short_description: "Review recordings and manage transcription replacements."
+  default_prompt: "Use $transcription-refinement to review the latest recordings and prepare refinement.md."

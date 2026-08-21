@@ -1,16 +1,16 @@
 # ZeroType Transcription Refinement
 
-這個 repository 提供 ZeroType 的 `transcription-refinement` Skill。它讓 Agent 從 deterministic replacement 前的原始文字整理 `Transcription` 與 `FinalOutput` 候選，再交由使用者人工審核。
+這個 repository 提供 ZeroType 的 `transcription-refinement` Skill。Agent 會分析 deterministic replacement 前的 Recording 文字，整理 `Transcription` 與 `FinalOutput` 候選，最後由使用者人工審核。
 
-Skill 詳細規則位於 [`skills/transcription-refinement/SKILL.md`](skills/transcription-refinement/SKILL.md)；本 README 著重安裝方式、路徑設定與可複製的 Prompt Harness，不重複 Skill 內的判定規則。
+完整的判定、驗證與匯入規則以 [`skills/transcription-refinement/SKILL.md`](skills/transcription-refinement/SKILL.md) 為準；本 README 只說明安裝與實際操作入口。
 
 ## 安裝
 
-需要 Node.js/npm，以及目前的 `npx skills` CLI。
+使用 `npx skills` 安裝時需要 Node.js 與 npm。
 
 ### Global 安裝
 
-適合多個 project 共用：
+適合跨 project 共用：
 
 ```bash
 npx skills add woodstoch/transcription-refinement \
@@ -18,9 +18,17 @@ npx skills add woodstoch/transcription-refinement \
   --global --copy --yes
 ```
 
+管理 global 安裝：
+
+```bash
+npx skills list --global
+npx skills update transcription-refinement --global --yes
+npx skills remove transcription-refinement --global --yes
+```
+
 ### Project 安裝
 
-在 project 根目錄執行，適合只讓單一 project 使用：
+在 project 根目錄執行，適合只讓目前 project 使用：
 
 ```bash
 npx skills add woodstoch/transcription-refinement \
@@ -28,181 +36,142 @@ npx skills add woodstoch/transcription-refinement \
   --copy --yes
 ```
 
-常用管理指令：
+管理 project 安裝：
 
 ```bash
 npx skills list
-npx skills update transcription-refinement
-npx skills remove transcription-refinement
+npx skills update transcription-refinement --yes
+npx skills remove transcription-refinement --yes
 ```
 
-`--copy` 會複製 Skill 檔案，而不是建立 symlink。Global 安裝的實際目錄由 `npx skills` 與 Agent 管理；README 不假設任何作業系統的絕對路徑。
+`--copy` 會複製 Skill，而不是建立 symlink。Global 與 project 的實際安裝位置均由 `npx skills` 及 Agent 管理，不要假設固定目錄。只有直接 checkout 本 repository 時，Skill 路徑才是 `<repo-root>/skills/transcription-refinement`。
 
-## 通用路徑
+## 一般使用流程
 
-以下變數由使用者依環境設定，所有操作都避免寫死作業系統路徑：
+多數使用者只需要依序使用三個提示詞。舊版 Recording fallback、模型分布與證據狀態都由 Skill 在同一次整理中處理，不需要拆成不同模式。
+
+### 1. 整理 Recording
+
+```text
+請使用已安裝的 transcription-refinement Skill，
+整理目前 ZeroType workspace 中最新 <COUNT> 份 Recording。
+
+預設同時分析 Transcription 與 FinalOutput；遇到舊版資料時依 Skill 的 fallback 規則處理。
+建立 agent_proposals.json 與 refinement.md，顯示證據與模型摘要，
+然後停在人工審核階段，不要匯入。
+```
+
+可選擇補充：
+
+- 指定日期範圍，取代最新 `<COUNT>` 份。
+- 只整理 `Transcription` 或 `FinalOutput`。這是 Agent 建立 proposal 時的範圍限制，不是建置腳本的 `--stage` 模式。
+- Recording 不在目前 workspace 的標準位置時，提供其實際路徑。
+
+### 2. 審核候選
+
+```text
+請使用已安裝的 transcription-refinement Skill，
+協助我審核 refinement.md 中的候選 <CANDIDATE_IDS>。
+
+保留原始提議與非破壞性驗證資訊；若我指定回聽，請定位對應 Recording 的 audio.wav 協助查核。
+等待我決定修改、approved 或 rejected，這一步不要匯入。
+```
+
+### 3. 匯入前 dry-run
+
+```text
+請使用已安裝的 transcription-refinement Skill。
+
+refinement：<REFINEMENT_FILE>
+匯入模式：<mixed-or-separate>
+目標檔案：<TARGET_REPLACEMENTS_FILE>
+model_profile：<SEPARATE_ONLY_PROFILE>
+scope sidecar：<SCOPE_FILE>
+
+先檢查 batch 註解與所有 approved rows 的 mode、profile、target 是否一致，
+再執行唯讀 dry-run，列出兩個 section 的新增、duplicate、conflict 與 scope 警告。
+完成後等待我第二次明確確認，不要正式匯入。
+```
+
+`model_profile` 只在 `separate` 模式需要。第二次確認前不得移除 `--dry-run`。
+
+## 進階 CLI
+
+一般使用時可讓 Agent 解析已載入 Skill 的位置。只有手動執行腳本時才需要設定路徑：
 
 ```bash
-PROJECT_ROOT="<project-root>"
-SKILL_ROOT="<installed-or-checkout-skill-root>"
+SKILL_ROOT="<resolved-installed-skill-root>"
 RECORDINGS_DIR="<recordings-directory>"
-REPLACEMENTS_FILE="<global-replacements-file>"
+GLOBAL_REPLACEMENTS_FILE="<path>/global_replacements.json"
+MODEL_REPLACEMENTS_FILE="<existing-model-specific-file>"
 SCOPE_FILE="<scope-sidecar-file>"
 PROPOSALS_FILE="<agent-proposals-file>"
 REFINEMENT_FILE="<refinement-output-file>"
 ```
 
-若使用 project checkout，可將 `SKILL_ROOT` 設為：
-
-```bash
-SKILL_ROOT="$PROJECT_ROOT/skills/transcription-refinement"
-```
-
-Global 安裝時，請讓 Agent 解析已載入 Skill 的自身路徑，不要自行猜測全域安裝目錄。
-
-## 基本執行
-
-Agent 先依下方 Prompt Harness 建立 `PROPOSALS_FILE`，再執行：
+建置最新 100 份 Recording：
 
 ```bash
 python3 "$SKILL_ROOT/scripts/build_refinement.py" \
-  --all \
+  --count 100 \
   --recordings "$RECORDINGS_DIR" \
-  --replacements "$REPLACEMENTS_FILE" \
+  --replacements "$GLOBAL_REPLACEMENTS_FILE" \
   --scope-file "$SCOPE_FILE" \
   --proposals "$PROPOSALS_FILE" \
   --output "$REFINEMENT_FILE"
 ```
 
-未提供 proposals 時，建置器只建立證據與模型統計，不會從下游差異自動發明候選。
+也可改用 `--all --since <TIMESTAMP> --until <TIMESTAMP>`。`--count` 與 `--all` 必須擇一。未提供 `--proposals` 時，建置器只產生來源、證據與模型統計，不會從下游差異建立候選。
 
-## Prompt Harness
+## 匯入安全閘門
 
-以下提示詞只負責任務編排。候選來源、fallback、模型 scope、人工審核與匯入安全規則，均以已安裝的 `transcription-refinement` Skill 為準。
+匯入前必須完成以下準備：
 
-每個 Harness 都應填入：`<RANGE>`、`<STAGE>`、`<RECORDINGS_DIR>`、`<PROPOSALS_FILE>`、`<REFINEMENT_FILE>`。
-
-### 1. 最新完整 Recording 整理
-
-```text
-請使用已安裝的 transcription-refinement Skill。
-
-工作模式：latest-full
-Recording 範圍：<RANGE>
-目標 stage：Transcription + FinalOutput
-Recordings 路徑：<RECORDINGS_DIR>
-候選輸出：<PROPOSALS_FILE>
-整理輸出：<REFINEMENT_FILE>
-
-請完成候選整理與模型分布報告，停在人工審核階段，不要執行正式匯入。
-```
-
-### 2. 舊版／部分證據 Recording 整理
+- 使用者已將候選設為 `approved` 或 `rejected`；Importer 只讀取 `approved` rows。
+- `refinement.md` 包含正確的 batch routing 註解：
 
 ```text
-請使用已安裝的 transcription-refinement Skill。
-
-工作模式：legacy-partial
-Recording 範圍：<RANGE>
-目標 stage：<STAGE>
-Recordings 路徑：<RECORDINGS_DIR>
-候選輸出：<PROPOSALS_FILE>
-整理輸出：<REFINEMENT_FILE>
-
-請整理仍有原始來源的可用部分，將缺少的下游檔案列為驗證註記，並停在人工審核階段。
+<!-- replacement_mode: mixed|separate -->
+<!-- target_file: ... -->
 ```
 
-### 3. 只分析 Transcription
+- 所有 approved rows 的 `replacement_mode`、`target_file` 與 CLI 相符；`separate` 還必須是同一個 `model_profile`。
 
-```text
-請使用已安裝的 transcription-refinement Skill。
-
-工作模式：transcription-only
-Recording 範圍：<RANGE>
-目標 stage：Transcription
-Recordings 路徑：<RECORDINGS_DIR>
-候選輸出：<PROPOSALS_FILE>
-整理輸出：<REFINEMENT_FILE>
-
-只整理 Transcription 候選，不建立 FinalOutput 候選；完成後停在人工審核階段。
-```
-
-### 4. 只分析 FinalOutput
-
-```text
-請使用已安裝的 transcription-refinement Skill。
-
-工作模式：final-output-only
-Recording 範圍：<RANGE>
-目標 stage：FinalOutput
-Recordings 路徑：<RECORDINGS_DIR>
-候選輸出：<PROPOSALS_FILE>
-整理輸出：<REFINEMENT_FILE>
-
-只整理 FinalOutput 候選，不建立 Transcription 候選；完成後停在人工審核階段。
-```
-
-### 5. 多模型 profile 範圍檢查
-
-```text
-請使用已安裝的 transcription-refinement Skill。
-
-工作模式：model-scope-audit
-Recording 範圍：<RANGE>
-目標 stage：<STAGE>
-Recordings 路徑：<RECORDINGS_DIR>
-候選輸出：<PROPOSALS_FILE>
-整理輸出：<REFINEMENT_FILE>
-
-請先列出每個 model_profile、候選數、未知模型與跨模型規則警告，等待我選擇 mixed 或 separate，不要自行匯入。
-```
-
-### 6. 指定 Recording 回聽驗證
-
-```text
-請使用已安裝的 transcription-refinement Skill。
-
-工作模式：audio-review
-指定 Recording：<TIMESTAMP>
-指定候選編號：<CANDIDATE_ID>
-整理輸出：<REFINEMENT_FILE>
-
-請提供該候選的音訊路徑與原始判定，等待我回聽後再由我決定修改、核准或拒絕；不要自動寫入 replacement。
-```
-
-### 7. 人工審核後的 dry-run 與正式匯入
-
-```text
-請使用已安裝的 transcription-refinement Skill。
-
-工作模式：review-and-import
-整理輸出：<REFINEMENT_FILE>
-匯入模式：<mixed-or-separate>
-model_profile：<PROFILE-OR-NONE>
-目標 replacement 檔案：<REPLACEMENTS_FILE>
-scope sidecar：<SCOPE_FILE>
-
-請先確認人工審核完成，執行唯讀 dry-run 並列出兩個 section 的新增、duplicate、conflict 與 scope 警告。除非我再次明確確認，不要執行正式匯入。
-```
-
-## 匯入原則
-
-人工審核完成並明確選擇模式後，先執行 dry-run：
+### Mixed dry-run
 
 ```bash
 python3 "$SKILL_ROOT/scripts/import_replacements.py" \
   --refinement "$REFINEMENT_FILE" \
-  --mode <mixed-or-separate> \
-  --replacements "$REPLACEMENTS_FILE" \
+  --mode mixed \
+  --replacements "$GLOBAL_REPLACEMENTS_FILE" \
   --scope-file "$SCOPE_FILE" \
   --dry-run
 ```
 
-只有第二次明確確認後才移除 `--dry-run`。`mixed` 維護統一 replacement 檔案；`separate` 只使用已存在的模型專用檔案，不建立新檔或切換 ZeroType 設定。
+`mixed` 的目標檔名必須是 `global_replacements.json`。
+
+### Separate dry-run
+
+```bash
+MODEL_PROFILE="<single-model-profile>"
+
+python3 "$SKILL_ROOT/scripts/import_replacements.py" \
+  --refinement "$REFINEMENT_FILE" \
+  --mode separate \
+  --profile "$MODEL_PROFILE" \
+  --replacements "$MODEL_REPLACEMENTS_FILE" \
+  --scope-file "$SCOPE_FILE" \
+  --dry-run
+```
+
+`separate` 只接受使用者已建立的模型專用檔案；Skill 不會建立該檔案或切換 ZeroType 設定。其檔名不得是 `global_replacements.json`。
+
+檢查 dry-run 報告後，只有在使用者第二次明確確認時，才以完全相同的參數移除 `--dry-run` 正式匯入。
 
 ## Repository 內容
 
 - `skills/transcription-refinement/SKILL.md`：Skill 行為與安全規則
+- `skills/transcription-refinement/README.md`：Skill 內部流程摘要
 - `skills/transcription-refinement/scripts/`：建置與匯入腳本
 - `skills/transcription-refinement/references/`：runtime 與 scope schema
 - `skills/transcription-refinement/tests/`：工作流程測試

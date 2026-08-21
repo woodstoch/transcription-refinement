@@ -64,7 +64,7 @@ npx skills remove transcription-refinement --yes
 可選擇補充：
 
 - 指定日期範圍，取代最新 `<COUNT>` 份。
-- 只整理 `Transcription` 或 `FinalOutput`。這是 Agent 建立 proposal 時的範圍限制，不是建置腳本的 `--stage` 模式。
+- 只整理 `Transcription` 或 `FinalOutput`。這是可用的 Agent 行為：Agent 只為指定的 `target_section` 建立 proposals；但建置腳本沒有 `--stage` 參數，仍會盤點所選 Recording 的完整證據與模型資訊。
 - Recording 不在目前 workspace 的標準位置時，提供其實際路徑。
 
 ### 2. 審核候選
@@ -94,6 +94,49 @@ scope sidecar：<SCOPE_FILE>
 ```
 
 `model_profile` 只在 `separate` 模式需要。第二次確認前不得移除 `--dry-run`。
+
+## 常規整理到匯入範例
+
+以下是最常見的 mixed 流程。每一步都是獨立的使用者決定；Agent 不會因為完成上一階段就自動匯入。
+
+### 第一步：整理最新 Recording
+
+使用者：
+
+```text
+請使用已安裝的 transcription-refinement Skill，整理最新 100 份 Recording。
+同時分析 Transcription 與 FinalOutput，建立 agent_proposals.json 與 refinement.md，
+列出證據、模型與候選摘要，完成後停在人工審核，不要匯入。
+```
+
+Agent 應完成來源分析與非破壞性驗證，並回報 `refinement.md`。如果沒有候選，流程在此結束；不需要為了完成流程而執行匯入。
+
+### 第二步：人工審核候選
+
+使用者檢查 `refinement.md`，必要時要求回聽指定 Recording，修改候選內容，並將每列設為 `approved` 或 `rejected`。尚未決定的列保留 `pending`，Importer 會忽略它們。
+
+### 第三步：選擇 mixed 並執行 dry-run
+
+使用者：
+
+```text
+這批使用 mixed 模式，目標是 global_replacements.json。
+請更新 refinement.md 的 batch 與 approved rows routing，執行唯讀 dry-run，
+回報 Transcription、FinalOutput 的新增、duplicate、conflict 與模型 scope 警告。
+不要正式匯入。
+```
+
+Agent 應先檢查 routing、結構及 approved rows，再顯示 dry-run 結果。此時 `global_replacements.json` 與 scope sidecar 都不得被修改。
+
+### 第四步：第二次確認後正式匯入
+
+使用者核對 dry-run 結果後，另外發出明確確認：
+
+```text
+我確認使用剛才完全相同的 mixed、target file 與 approved rows 正式匯入。
+```
+
+Agent 才能移除 `--dry-run`，更新 `global_replacements.json` 與 scope sidecar，完成後回報實際新增、duplicate、conflict 及檔案位置。若 dry-run 後候選或 routing 有變更，必須重新 dry-run，不能沿用舊確認。
 
 ## 進階 CLI
 

@@ -95,6 +95,28 @@ scope sidecar：<SCOPE_FILE>
 
 `model_profile` 只在 `separate` 模式需要。第二次確認前不得移除 `--dry-run`。
 
+## `refinement.md` 目前版本的審核重點
+
+目前遠端 `main` 的 Skill 使用單一 Markdown table；完整欄位仍以已安裝 Skill 的 `SKILL.md` 與腳本輸出為準。人工審核時建議依以下順序閱讀：
+
+1. 先確認 `target_section`、Recording 與 `timestamp`，必要時開啟連結的 `audio.wav`。
+2. 檢查 `source_text`、`source_or_pattern`、`replacement`、`rule_type` 與 `reason`。
+3. 將 `review_status` 設為 `approved` 或 `rejected`；尚未決定的列保留 `pending`。
+4. 將下游證據、模型資訊與 routing 欄位視為驗證和匯入前檢查，不用它們覆蓋 Agent 的原始提議。
+
+`candidate_id` 是人工引用列的索引；`proposal_fingerprint` 是系統完整性檢查值，不需要手動產生或修改。Importer 只匯入 `approved` rows。
+
+### 全域 replacement 的詞彙風險（目前限制）
+
+目前版本尚未提供 `replacement_risk` 或 `review_required` 欄位，也不會自動判斷 source 是否為常用詞。使用者在設為 `approved` 前，仍需自行確認：
+
+- source 是否本來就是正常使用的常用字詞；
+- replacement 是否可能改掉其他合法上下文；
+- Literal 是否可能命中較長字詞中的子字串；
+- 是否需要回聽音訊或改成更精確的 Regex。
+
+這些檢查屬於人工審核，不應把 `validation_status` 解讀成詞彙風險或信心度。`replacement_risk`／`review_required` 若未來加入，必須同步更新 Skill、Importer、欄位 reference 與測試。
+
 ## 常規整理到匯入範例
 
 以下是最常見的 mixed 流程。每一步都是獨立的使用者決定；Agent 不會因為完成上一階段就自動匯入。

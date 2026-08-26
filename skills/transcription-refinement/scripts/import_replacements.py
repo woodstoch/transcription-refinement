@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import sys
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ APPROVED_STATUSES = {"approved", "keep", "採用", "通過"}
 TARGET_SECTIONS = ("Transcription", "FinalOutput")
 RUNTIME_SCHEMA = Path(__file__).resolve().parents[1] / "references" / "global_replacements.runtime.schema.json"
 SCOPE_SCHEMA = Path(__file__).resolve().parents[1] / "references" / "global_replacements.scope.schema.json"
+PROTECTED_TERMS_SCHEMA = Path(__file__).resolve().parents[1] / "references" / "protected_terms.schema.json"
 UNKNOWN_MODEL = "unknown"
 
 
@@ -33,6 +35,8 @@ class ApprovedRow:
     source: str
     target: str
     reason: str
+    replacement_risk: str
+    protected_term_match: str
     line_number: int
     timestamp: str
     transcription_engine: str
@@ -71,6 +75,12 @@ def parse_args() -> argparse.Namespace:
         help="Skill-owned model-scope registry; never read by ZeroType.",
     )
     parser.add_argument(
+        "--protected-terms",
+        type=Path,
+        default=Path("global_replacements.protected_terms.json"),
+        help="User-owned protected Literal terms; approved matches are removed after import.",
+    )
+    parser.add_argument(
         "--mode",
         choices=("mixed", "separate"),
         required=True,
@@ -86,6 +96,41 @@ def parse_args() -> argparse.Namespace:
 
 def clean_cell(value: str) -> str:
     return value.strip().replace("\\|", "|")
+
+
+def normalize_term(value: str) -> str:
+    return unicodedata.normalize("NFC", value)
+
+
+def load_protected_terms(path: Path) -> tuple[dict[tuple[str, str], dict[str, str]], bool]:
+    if not path.is_file():
+        return {}, False
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid protected terms file: {path}: {error}") from error
+    if not isinstance(document, dict) or document.get("schema_version") != 1 or not isinstance(document.get("entries"), list):
+        raise ValueError(f"invalid protected terms structure: {path}")
+    required = {"target_section", "term", "reason", "added_at", "updated_at", "source_candidate_id"}
+    result: dict[tuple[str, str], dict[str, str]] = {}
+    for entry in document["entries"]:
+        if not isinstance(entry, dict) or set(entry) != required:
+            raise ValueError(f"invalid protected term entry: {path}")
+        if entry["target_section"] not in TARGET_SECTIONS or not all(isinstance(entry[field], str) and entry[field] for field in required):
+            raise ValueError(f"invalid protected term values: {path}")
+        term = normalize_term(entry["term"])
+        if term != entry["term"]:
+            raise ValueError(f"protected term is not NFC-normalized: {entry['term']!r}")
+        key = (entry["target_section"], term)
+        if key in result:
+            raise ValueError(f"duplicate protected term: {key[0]} / {key[1]!r}")
+        result[key] = entry
+    return result, True
+
+
+def save_protected_terms(path: Path, entries: dict[tuple[str, str], dict[str, str]]) -> None:
+    document = {"schema_version": 1, "entries": list(entries.values())}
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def proposal_fingerprint(
@@ -119,6 +164,8 @@ def approved_pairs(path: Path) -> list[ApprovedRow]:
     proposal_fingerprint_index: int | None = None
     source_text_index: int | None = None
     reason_index: int | None = None
+    replacement_risk_index: int | None = None
+    protected_term_match_index: int | None = None
     evidence_status_index: int | None = None
     downstream_observed_index: int | None = None
     validation_status_index: int | None = None
@@ -156,6 +203,8 @@ def approved_pairs(path: Path) -> list[ApprovedRow]:
             proposal_fingerprint_index = header.get("proposal_fingerprint")
             source_text_index = header.get("source_text")
             reason_index = header.get("reason")
+            replacement_risk_index = header.get("replacement_risk")
+            protected_term_match_index = header.get("protected_term_match")
             evidence_status_index = header.get("evidence_status")
             downstream_observed_index = header.get("downstream_observed")
             validation_status_index = header.get("validation_status")
@@ -189,6 +238,8 @@ def approved_pairs(path: Path) -> list[ApprovedRow]:
             proposal_fingerprint_index = None
             source_text_index = None
             reason_index = None
+            replacement_risk_index = None
+            protected_term_match_index = None
             evidence_status_index = None
             downstream_observed_index = None
             validation_status_index = None
@@ -216,6 +267,8 @@ def approved_pairs(path: Path) -> list[ApprovedRow]:
                     source=source,
                     target=target,
                     reason=cell_at(reason_index),
+                    replacement_risk=cell_at(replacement_risk_index, "unknown") or "unknown",
+                    protected_term_match=cell_at(protected_term_match_index, "not_checked") or "not_checked",
                     line_number=line_number,
                     timestamp=cell_at(timestamp_index),
                     transcription_engine=cell_at(engine_index, UNKNOWN_MODEL) or UNKNOWN_MODEL,
@@ -527,6 +580,7 @@ def main() -> int:
         pairs = approved_pairs(args.refinement)
         refinement_metadata = parse_refinement_metadata(args.refinement)
         scope_registry = load_scope_registry(args.scope_file)
+        protected_terms, protected_terms_checked = load_protected_terms(args.protected_terms)
         validate_import_scope(args, refinement_metadata, pairs)
         for row in pairs:
             if not row.proposal_fingerprint:
@@ -569,6 +623,13 @@ def main() -> int:
     section_conflicts = {section: 0 for section in TARGET_SECTIONS}
     cross_model_scope_warnings = 0
     legacy_unscoped_warnings = 0
+    protected_removals: dict[tuple[str, str], dict[str, str]] = {}
+
+    def queue_protected_removal(row: ApprovedRow) -> None:
+        if row.rule_type == "Literal" and protected_terms_checked:
+            key = (row.target_section, normalize_term(row.source))
+            if key in protected_terms:
+                protected_removals[key] = protected_terms[key]
 
     def count_scope_warning(row: ApprovedRow) -> None:
         nonlocal cross_model_scope_warnings, legacy_unscoped_warnings
@@ -633,10 +694,12 @@ def main() -> int:
                 skipped += 1
                 section_skips[target_section] += 1
                 count_scope_warning(row)
+                queue_protected_removal(row)
                 continue
             if (source, requested_target) in regex_additions[target_section]:
                 skipped += 1
                 section_skips[target_section] += 1
+                queue_protected_removal(row)
                 continue
             regex_additions[target_section].append((source, requested_target))
             regex_rule_owners[target_section][source].add(requested_target)
@@ -666,6 +729,7 @@ def main() -> int:
                 skipped += 1
                 section_skips[target_section] += 1
                 count_scope_warning(row)
+                queue_protected_removal(row)
                 continue
             add_conflict(row,
                 f"line {line_number}: {target_section} Literal source {source!r} overlaps Regex targets "
@@ -680,9 +744,11 @@ def main() -> int:
             section_skips[target_section] += 1
             if source in current_sources:
                 count_scope_warning(row)
+            queue_protected_removal(row)
             continue
         additions[target_section][target].append(source)
         owners[target_section][source_key].add(target)
+        queue_protected_removal(row)
 
     if conflicts:
         print(
@@ -704,6 +770,8 @@ def main() -> int:
             f"dry_run mode={args.mode} profile={args.profile or '-'} target_file={args.replacements} "
             f"approved_pairs={len(pairs)} total_add={added} skip={skipped} "
             f"proposal_modified_after_review={modified_after_review} "
+            f"protected_terms_checked={str(protected_terms_checked).lower()} "
+            f"protected_terms_remove={len(protected_removals)} "
             + " ".join(
                 f"{section.lower()}_literal_add={literal_counts[section]} "
                 f"{section.lower()}_regex_add={regex_counts[section]} "
@@ -725,6 +793,8 @@ def main() -> int:
                 print(f"{target}: {', '.join(additions[section][target])}")
             for pattern, replacement in regex_additions[section]:
                 print(f"Regex {pattern}: {replacement}")
+        for section, term in sorted(protected_removals):
+            print(f"protected term remove {section}: {term}")
         return 0
 
     for section in TARGET_SECTIONS:
@@ -749,10 +819,24 @@ def main() -> int:
     except (OSError, UnicodeError, ValueError) as error:
         print(f"error: updated scope sidecar failed validation: {error}", file=sys.stderr)
         return 1
+    if protected_removals:
+        if not protected_terms_checked:
+            print("error: protected term removals requested but protected terms file was not checked", file=sys.stderr)
+            return 1
+        remaining = {
+            key: entry for key, entry in protected_terms.items() if key not in protected_removals
+        }
+        try:
+            save_protected_terms(args.protected_terms, remaining)
+            load_protected_terms(args.protected_terms)
+        except (OSError, UnicodeError, ValueError) as error:
+            print(f"error: protected terms update failed after replacement import: {error}", file=sys.stderr)
+            return 1
     print(
         f"imported mode={args.mode} profile={args.profile or '-'} target_file={args.replacements} "
         f"approved_pairs={len(pairs)} total_add={added} skip={skipped} "
         f"proposal_modified_after_review={modified_after_review} "
+        f"protected_terms_checked={str(protected_terms_checked).lower()} protected_terms_remove={len(protected_removals)} "
         + " ".join(
             f"{section.lower()}_literal_add={literal_counts[section]} "
             f"{section.lower()}_regex_add={regex_counts[section]} "

@@ -38,7 +38,9 @@ TIMESTAMP_DIRECTORY = re.compile(r"^\d{8}-\d{6}-\d+$")
 TARGET_SECTIONS = ("Transcription", "FinalOutput")
 RUNTIME_SCHEMA = Path(__file__).resolve().parents[1] / "references" / "global_replacements.runtime.schema.json"
 SCOPE_SCHEMA = Path(__file__).resolve().parents[1] / "references" / "global_replacements.scope.schema.json"
+PROTECTED_TERMS_SCHEMA = Path(__file__).resolve().parents[1] / "references" / "protected_terms.schema.json"
 UNKNOWN_MODEL = "unknown"
+RISK_VALUES = {"none", "common_term", "rare_or_domain", "context_sensitive", "unknown"}
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,12 @@ def parse_args() -> argparse.Namespace:
         help="Skill-owned model-scope registry used for warnings; never read by ZeroType.",
     )
     parser.add_argument(
+        "--protected-terms",
+        type=Path,
+        default=Path("global_replacements.protected_terms.json"),
+        help="User-owned Literal terms that are protected from replacement; missing means not_checked.",
+    )
+    parser.add_argument(
         "--proposals",
         type=Path,
         help=(
@@ -121,6 +129,54 @@ def read_json(path: Path) -> Any | None:
 
 def text_value(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def normalize_term(value: str) -> str:
+    import unicodedata
+    return unicodedata.normalize("NFC", value)
+
+
+def load_protected_terms(path: Path) -> tuple[dict[tuple[str, str], dict[str, str]], bool]:
+    """Return exact section/term entries and whether the file was checked."""
+    if not path.is_file():
+        return {}, False
+    document = read_json(path)
+    if not isinstance(document, dict) or document.get("schema_version") != 1 or not isinstance(document.get("entries"), list):
+        raise ValueError(f"invalid protected terms structure: {path}")
+    result: dict[tuple[str, str], dict[str, str]] = {}
+    required = {"target_section", "term", "reason", "added_at", "updated_at", "source_candidate_id"}
+    for entry in document["entries"]:
+        if not isinstance(entry, dict) or set(entry) != required:
+            raise ValueError(f"invalid protected term entry: {path}")
+        if entry["target_section"] not in TARGET_SECTIONS or not all(isinstance(entry[field], str) and entry[field] for field in required):
+            raise ValueError(f"invalid protected term values: {path}")
+        term = normalize_term(entry["term"])
+        if term != entry["term"]:
+            raise ValueError(f"protected term is not NFC-normalized: {entry['term']!r}")
+        key = (entry["target_section"], term)
+        if key in result:
+            raise ValueError(f"duplicate protected term: {key[0]} / {key[1]!r}")
+        result[key] = entry
+    return result, True
+
+
+def protected_term_match(
+    proposal: dict[str, Any],
+    protected_terms: dict[tuple[str, str], dict[str, str]],
+    protected_terms_checked: bool,
+) -> str:
+    if proposal["rule_type"] != "Literal":
+        return "not_applicable"
+    if not protected_terms_checked:
+        return "not_checked"
+    key = (proposal["target_section"], normalize_term(proposal["source_or_pattern"]))
+    return "matched" if key in protected_terms else "not_matched"
+
+
+def initial_review_status(risk: str, protected_match: str) -> str:
+    if risk != "none" or protected_match in {"matched", "not_checked"}:
+        return "review_required"
+    return "pending"
 
 
 def profile_part(value: str) -> str:
@@ -443,6 +499,8 @@ def select_recordings(args: argparse.Namespace) -> list[Path]:
 
 
 def append_remark(existing: str, value: str) -> str:
+    if not value:
+        return existing
     if not existing:
         return value
     return f"{existing}; {value}"
@@ -489,6 +547,7 @@ def load_agent_proposals(path: Path | None) -> list[dict[str, Any]]:
         source_or_pattern = text_value(item.get("source_or_pattern"))
         source_text = text_value(item.get("source_text")) or source_or_pattern
         reason = text_value(item.get("reason")) or "Agent 主動判定，待人工審核"
+        replacement_risk = text_value(item.get("replacement_risk")) or "unknown"
         if not recording or section not in TARGET_SECTIONS or not source_or_pattern or not replacement:
             raise ValueError(
                 f"proposal {index} requires recording, target_section, source_or_pattern, and replacement"
@@ -497,6 +556,8 @@ def load_agent_proposals(path: Path | None) -> list[dict[str, Any]]:
             raise ValueError(f"proposal {index}: rule_type must be Literal or Regex")
         if not source_text:
             raise ValueError(f"proposal {index}: source_text must not be empty")
+        if replacement_risk not in RISK_VALUES:
+            raise ValueError(f"proposal {index}: replacement_risk must be one of {sorted(RISK_VALUES)}")
         requested_status = text_value(item.get("review_status") or item.get("status"))
         if requested_status and requested_status != "pending":
             raise ValueError(f"proposal {index}: Agent proposal status must be pending; approval is user-only")
@@ -509,6 +570,7 @@ def load_agent_proposals(path: Path | None) -> list[dict[str, Any]]:
                 "replacement": replacement,
                 "rule_type": "Regex" if rule_type.casefold() == "regex" else "Literal",
                 "reason": reason,
+                "replacement_risk": replacement_risk,
                 "review_status": "pending",
                 "candidate_id": text_value(item.get("candidate_id")),
                 "proposal_fingerprint": text_value(item.get("proposal_fingerprint")),
@@ -565,6 +627,7 @@ def main() -> int:
         recordings = select_recordings(args)
         existing_rules = load_existing_rules(args.replacements, args.schema)
         scope_registry = load_scope_registry(args.scope_file)
+        protected_terms, protected_terms_checked = load_protected_terms(args.protected_terms)
         proposals = load_agent_proposals(args.proposals)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
@@ -599,6 +662,9 @@ def main() -> int:
     cross_model_scope_warnings = 0
     legacy_unscoped_warnings = 0
     scope_warning_profiles: Counter[str] = Counter()
+    risk_counts: Counter[str] = Counter()
+    protected_match_counts: Counter[str] = Counter()
+    review_required_items = 0
     review_records: set[str] = set()
     pending_literal_owners: dict[str, dict[str, set[str]]] = {section: {} for section in TARGET_SECTIONS}
     pending_regex_owners: dict[str, dict[str, set[str]]] = {section: {} for section in TARGET_SECTIONS}
@@ -701,6 +767,17 @@ def main() -> int:
                     validation_status = "batch_duplicate"
                 owners.setdefault(proposal["source_or_pattern"], set()).add(proposal["replacement"])
         validation_note = append_remark(validation_note, policy_warning(proposal))
+        protected_match = protected_term_match(proposal, protected_terms, protected_terms_checked)
+        risk = proposal["replacement_risk"]
+        review_status = initial_review_status(risk, protected_match)
+        risk_counts[risk] += 1
+        protected_match_counts[protected_match] += 1
+        if review_status == "review_required":
+            review_required_items += 1
+            if protected_match == "matched":
+                validation_note = append_remark(validation_note, "protected_term_match; user must explicitly decide whether to remove protection")
+            elif protected_match == "not_checked":
+                validation_note = append_remark(validation_note, "protected_terms_not_checked; initialize or provide the protected terms file")
         if proposal["proposal_fingerprint"] and proposal["proposal_fingerprint"] != fingerprint:
             validation_note = append_remark(validation_note, "proposal_fingerprint_mismatch; requires human review")
         remark = ""
@@ -720,12 +797,14 @@ def main() -> int:
                 "recording": recording.name,
                 "target_section": proposal["target_section"],
                 "review_stage": stage.review_stage,
+                "replacement_risk": risk,
+                "protected_term_match": protected_match,
                 "source_text": proposal["source_text"],
                 "source_or_pattern": proposal["source_or_pattern"],
                 "replacement": proposal["replacement"],
                 "rule_type": proposal["rule_type"],
                 "reason": proposal["reason"],
-                "review_status": proposal["review_status"] if proposal["review_status"] in {"pending", "approved", "rejected"} else "pending",
+                "review_status": review_status,
                 "evidence_status": evidence_status,
                 "downstream_observed": downstream_observed,
                 "validation_status": validation_status,
@@ -749,16 +828,25 @@ def main() -> int:
         review_records.add(recording.name)
 
     headers = (
-        "candidate_id", "proposal_fingerprint", "timestamp", "recording", "target_section", "review_stage",
-        "source_text", "source_or_pattern", "replacement", "rule_type", "reason", "review_status",
+        "candidate_id", "target_section", "recording", "timestamp", "replacement_risk", "protected_term_match",
+        "review_status", "source_text", "source_or_pattern", "replacement", "rule_type", "reason",
         "evidence_status", "downstream_observed", "validation_status", "validation_note",
         "transcription_engine", "transcription_model", "correction_model", "model_profile", "model_evidence",
-        "replacement_mode", "target_file", "remark",
+        "replacement_mode", "target_file", "proposal_fingerprint", "review_stage", "remark",
     )
     markdown = [
         "<!-- replacement_mode: pending -->",
         "<!-- target_file: -->",
         "<!-- proposal_source: agent_proposals.json; downstream files are validation only -->",
+        "## 欄位分組（由左至右）",
+        "",
+        "1. **提議與審核**：candidate_id、target_section、recording、timestamp、replacement_risk、protected_term_match、review_status、source_text、source_or_pattern、replacement、rule_type、reason。",
+        "2. **下游驗證**：evidence_status、downstream_observed、validation_status、validation_note。",
+        "3. **模型稽核**：transcription_engine、transcription_model、correction_model、model_profile、model_evidence。",
+        "4. **匯入路由與系統稽核**：replacement_mode、target_file、proposal_fingerprint、review_stage、remark。",
+        "",
+        "candidate_id 是人工引用索引；proposal_fingerprint 是完整性檢查值，兩者由建置腳本維護。",
+        "",
         "| " + " | ".join(headers) + " |",
         "|" + "---|" * len(headers),
     ]
@@ -785,6 +873,9 @@ def main() -> int:
         f"missing_audio_files={missing_audio_files} "
         f"missing_core_files={','.join(f'{filename}:{missing_core_files[filename]}' for filename in CORE_FILES if missing_core_files[filename]) or '-'} "
         f"unknown_model_records={unknown_model_records} mixed_model_profiles={str(mixed_model_profiles).lower()} "
+        f"review_required_items={review_required_items} protected_terms_checked={str(protected_terms_checked).lower()} "
+        f"replacement_risks={','.join(f'{risk}:{risk_counts[risk]}' for risk in sorted(risk_counts)) or '-'} "
+        f"protected_term_matches={','.join(f'{status}:{protected_match_counts[status]}' for status in sorted(protected_match_counts)) or '-'} "
         f"cross_model_scope_warnings={cross_model_scope_warnings} legacy_unscoped_warnings={legacy_unscoped_warnings} "
         f"model_profiles={','.join(f'{profile}:{model_record_counts[profile]}:{model_candidate_counts[profile]}:{model_unknown_record_counts[profile]}' for profile in sorted(model_record_counts))} "
         f"transcription_models={','.join(f'{model}:{transcription_model_record_counts[model]}:{transcription_model_candidate_counts[model]}' for model in sorted(transcription_model_record_counts))} "

@@ -9,6 +9,9 @@ Use this Skill for ZeroType recording-to-vocabulary review. The Agent proposes d
 
 The Skill-owned `references/global_replacements.runtime.schema.json` describes the observed runtime `{ "Pattern": "...", "Replacement": "..." }` Regex object format. The scope schema is provenance metadata only. Neither changes or claims conformance to the bundled official `global_replacements.schema.json`.
 
+The generated `refinement.md` field contract is documented in [`references/refinement-format.md`](references/refinement-format.md). Keep the Markdown table as one canonical table so the Importer can continue parsing named headers.
+The protected-term contract is documented in [`references/protected_terms.schema.json`](references/protected_terms.schema.json); manage the user-owned `global_replacements.protected_terms.json` only through explicit operator actions.
+
 ## Sources and model evidence
 
 - `transcription_text.txt` (or the documented legacy fallback) is the only proposal source for `Transcription`.
@@ -31,6 +34,7 @@ First select recordings and prepare an Agent proposal JSON. The proposal file is
   "source_or_pattern": "raw term",
   "replacement": "canonical term",
   "rule_type": "Literal",
+  "replacement_risk": "common_term",
   "reason": "why this deterministic correction is proposed"
 }
 ```
@@ -42,16 +46,24 @@ Run from the workspace root:
 ```bash
 python3 skills/transcription-refinement/scripts/build_refinement.py \
   --all --scope-file global_replacements.scope.json \
+  --protected-terms global_replacements.protected_terms.json \
   --proposals agent_proposals.json
 ```
 
 Without `--proposals`, the script produces an empty review table plus evidence/model statistics. It reports observed downstream differences as hints only; it never turns those differences into candidates.
 
-The generated `refinement.md` keeps immutable proposal fields (`candidate_id`, `proposal_fingerprint`, `recording`, `target_section`, `source_text`, `source_or_pattern`, `replacement`, `rule_type`, `reason`) separate from validation fields:
+The generated `refinement.md` displays four adjacent field groups: proposal/review, downstream validation, model audit, and import routing/system audit. `target_section` decides the replacement section; `review_stage` only identifies the evidence stage. `candidate_id` is the human row index; `proposal_fingerprint` is a system integrity value and should not be edited.
 
-- `review_status`: `pending`, `approved`, or `rejected`.
-- `evidence_status`: `full_evidence`, `partial_evidence`, or `missing_downstream`.
-- `downstream_observed`, `validation_status`, and `validation_note`.
+The proposal/review group contains the Agent proposal fields, `replacement_risk`, `protected_term_match`, and `review_status` (`pending`, `review_required`, `approved`, or `rejected`). A non-`none` risk, a protected-term hit, or an unchecked protected-term file starts at `review_required`; this is an audit gate, not confidence. The validation group is informational and cannot replace proposal values. Model and routing fields are generated or selected for audit and import scope.
+
+Protected terms are exact Literal sources scoped independently to `Transcription` or `FinalOutput`. A match remains visible in the table and is never auto-rejected. If the user explicitly rejects a Literal candidate as unsafe, add it with:
+
+```bash
+python3 skills/transcription-refinement/scripts/manage_protected_terms.py add \
+  --file global_replacements.protected_terms.json \
+  --refinement refinement.md --candidate-id <candidate-id> \
+  --reason "正常用語，不應被全域替換"
+```
 
 Validation status can be `matched`, `mismatch`, `no_observed_change`, `duplicate`, `conflict`, `batch_duplicate`, or `evidence_missing`. It is informational and never overwrites the Agent proposal. `conversionChanged=true` is recorded as a mismatch note; it is not low-confidence rejection. There is no confidence field or low-confidence filter.
 
@@ -77,15 +89,17 @@ Run a read-only dry-run, then obtain a second explicit confirmation before remov
 ```bash
 python3 skills/transcription-refinement/scripts/import_replacements.py \
   --refinement refinement.md --mode mixed \
-  --scope-file global_replacements.scope.json --dry-run
+  --scope-file global_replacements.scope.json \
+  --protected-terms global_replacements.protected_terms.json --dry-run
 
 python3 skills/transcription-refinement/scripts/import_replacements.py \
   --refinement refinement.md --mode separate \
   --profile Remote__whisper-large-v3-turbo__openai-gpt-oss-120b \
   --replacements existing-model-replacements.json \
-  --scope-file global_replacements.scope.json --dry-run
+  --scope-file global_replacements.scope.json \
+  --protected-terms global_replacements.protected_terms.json --dry-run
 ```
 
-Dry-run reports mode, profile, target file, both sections’ additions/duplicates/conflicts, validation warnings, and cross-model warnings without writing replacement JSON or scope metadata. CLI mode/profile/target must match the batch and every row. Regex objects and both replacement sections are validated before and after import. Pending/rejected rows are ignored; duplicate approved rows remain visible in the report but are not written twice.
+Dry-run reports mode, profile, target file, both sections’ additions/duplicates/conflicts, protected terms scheduled for removal, validation warnings, and cross-model warnings without writing replacement JSON, scope metadata, or the protected-term file. CLI mode/profile/target must match the batch and every row. Regex objects and both replacement sections are validated before and after import. Pending/review_required/rejected rows are ignored; duplicate approved rows remain visible in the report but are not written twice. An approved Literal that still matches the live protected-term file removes that protection only during the confirmed formal import.
 
 Never modify recordings, `appsettings.Local.json`, the official schema, the app bundle, or ZeroType settings.

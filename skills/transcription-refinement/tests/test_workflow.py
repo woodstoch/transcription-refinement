@@ -15,6 +15,9 @@ BUILD = SKILL_ROOT / "scripts" / "build_refinement.py"
 IMPORT = SKILL_ROOT / "scripts" / "import_replacements.py"
 RUNTIME_SCHEMA = SKILL_ROOT / "references" / "global_replacements.runtime.schema.json"
 SCOPE_SCHEMA = SKILL_ROOT / "references" / "global_replacements.scope.schema.json"
+REFINEMENT_FORMAT = SKILL_ROOT / "references" / "refinement-format.md"
+PROTECTED_SCHEMA = SKILL_ROOT / "references" / "protected_terms.schema.json"
+MANAGE = SKILL_ROOT / "scripts" / "manage_protected_terms.py"
 
 
 def write_json(path: Path, value: object) -> None:
@@ -79,6 +82,12 @@ class WorkflowTests(unittest.TestCase):
             },
         )
 
+    def test_protected_terms_schema_declares_term_and_section(self) -> None:
+        schema = json.loads(PROTECTED_SCHEMA.read_text(encoding="utf-8"))
+        self.assertEqual(schema["properties"]["schema_version"]["enum"], [1])
+        self.assertEqual(schema["definitions"]["entry"]["properties"]["term"]["type"], "string")
+        self.assertEqual(schema["definitions"]["entry"]["properties"]["target_section"]["enum"], ["Transcription", "FinalOutput"])
+
     def test_build_uses_raw_sources_for_both_sections(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -110,13 +119,80 @@ class WorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             table = output.read_text(encoding="utf-8")
-            self.assertIn("| Transcription | STT |", table)
-            self.assertIn("| FinalOutput | PromptCorrection |", table)
+            self.assertIn("| candidate_id | target_section | recording | timestamp | replacement_risk | protected_term_match | review_status | source_text | source_or_pattern | replacement |", table)
+            self.assertIn("| Transcription | 20260814-100000-001 |", table)
+            self.assertIn("| FinalOutput | 20260814-100000-001 |", table)
+            self.assertIn("## 欄位分組（由左至右）", table)
             self.assertIn("badword", table)
             self.assertIn("candidate-", table)
             self.assertIn("badfinal", table)
             self.assertIn("transcription_review_items=1", result.stdout)
             self.assertIn("final_output_review_items=1", result.stdout)
+
+    def test_refinement_display_groups_fields_and_preserves_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            make_recording(
+                recordings,
+                "20260814-100000-015",
+                **{
+                    "transcription_text.txt": "badword",
+                    "transcription_processed_text.txt": "goodword",
+                    "prompt_correction_text.txt": "same",
+                    "output_text.txt": "same",
+                },
+            )
+            replacements = root / "global_replacements.json"
+            write_json(replacements, empty_replacements())
+            proposals = root / "agent_proposals.json"
+            write_proposals(
+                proposals,
+                [{
+                    "recording": "20260814-100000-015",
+                    "target_section": "Transcription",
+                    "source_text": "badword",
+                    "source_or_pattern": "badword",
+                    "replacement": "goodword",
+                    "rule_type": "Literal",
+                    "reason": "Agent proposal",
+                }],
+            )
+            output = root / "refinement.md"
+            result = run_build(recordings, replacements, output, "--proposals", str(proposals))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(REFINEMENT_FORMAT.is_file())
+            self.assertIn("proposal_fingerprint", REFINEMENT_FORMAT.read_text(encoding="utf-8"))
+            lines = output.read_text(encoding="utf-8").splitlines()
+            header_line = next(line for line in lines if line.startswith("| candidate_id |"))
+            headers = [cell.strip() for cell in header_line.strip("|").split("|")]
+            self.assertEqual(
+                headers,
+                [
+                    "candidate_id", "target_section", "recording", "timestamp", "replacement_risk", "protected_term_match",
+                    "review_status", "source_text", "source_or_pattern", "replacement", "rule_type", "reason",
+                    "evidence_status", "downstream_observed",
+                    "validation_status", "validation_note", "transcription_engine", "transcription_model",
+                    "correction_model", "model_profile", "model_evidence", "replacement_mode", "target_file",
+                    "proposal_fingerprint", "review_stage", "remark",
+                ],
+            )
+            row_line = next(line for line in lines if line.startswith("| candidate-"))
+            cells = [cell.strip() for cell in row_line.strip("|").split("|")]
+            row = dict(zip(headers, cells))
+            self.assertRegex(row["candidate_id"], r"^candidate-[0-9a-f]{16}$")
+            self.assertRegex(row["proposal_fingerprint"], r"^[0-9a-f]{64}$")
+            payload = "\x1f".join(("Transcription", "Literal", "badword", "badword", "goodword", "Agent proposal"))
+            self.assertEqual(row["proposal_fingerprint"], hashlib.sha256(payload.encode("utf-8")).hexdigest())
+            output_again = root / "refinement-again.md"
+            rerun = run_build(recordings, replacements, output_again, "--proposals", str(proposals))
+            self.assertEqual(rerun.returncode, 0, rerun.stderr)
+            rerun_lines = output_again.read_text(encoding="utf-8").splitlines()
+            rerun_row = next(line for line in rerun_lines if line.startswith("| candidate-"))
+            rerun_cells = [cell.strip() for cell in rerun_row.strip("|").split("|")]
+            self.assertEqual(rerun_cells[headers.index("candidate_id")], row["candidate_id"])
+            self.assertEqual(rerun_cells[headers.index("proposal_fingerprint")], row["proposal_fingerprint"])
 
     def test_duplicates_are_checked_within_each_section(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -328,7 +404,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             table = output.read_text(encoding="utf-8")
             self.assertIn("partial evidence / legacy fallback", table)
-            self.assertIn("| FinalOutput | PromptCorrection |", table)
+            self.assertIn("| FinalOutput | 20260814-100000-005 |", table)
             self.assertIn("| partial_evidence |", table)
             self.assertIn("| evidence_missing |", table)
             self.assertIn("full_evidence_records=0", result.stdout)
@@ -716,7 +792,7 @@ class WorkflowTests(unittest.TestCase):
             reviewed = refinement.read_text(encoding="utf-8")
             reviewed = reviewed.replace("<!-- replacement_mode: pending -->", "<!-- replacement_mode: mixed -->")
             reviewed = reviewed.replace("<!-- target_file: -->", "<!-- target_file: global_replacements.json -->")
-            reviewed = reviewed.replace("| pending |", "| approved |", 1)
+            reviewed = reviewed.replace("| review_required |", "| approved |", 1)
             reviewed = reviewed.replace("| pending |", "| mixed |", 1)
             reviewed = reviewed.replace("|  |", "| global_replacements.json |", 1)
             refinement.write_text(reviewed, encoding="utf-8")
@@ -772,6 +848,131 @@ class WorkflowTests(unittest.TestCase):
             )
             self.assertEqual(dry.returncode, 0, dry.stderr)
             self.assertIn("transcription_regex_add=0", dry.stdout)
+
+    def test_protected_literal_match_is_visible_and_requires_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            make_recording(
+                recordings,
+                "20260814-100000-020",
+                **{
+                    "transcription_text.txt": "normalword",
+                    "transcription_processed_text.txt": "canonical",
+                    "prompt_correction_text.txt": "same",
+                    "output_text.txt": "same",
+                },
+            )
+            replacements = root / "global_replacements.json"
+            write_json(replacements, empty_replacements())
+            protected = root / "protected.json"
+            write_json(
+                protected,
+                {"schema_version": 1, "entries": [{
+                    "target_section": "Transcription", "term": "normalword", "reason": "正常用語",
+                    "added_at": "2026-08-14T00:00:00+00:00", "updated_at": "2026-08-14T00:00:00+00:00",
+                    "source_candidate_id": "manual",
+                }]},
+            )
+            proposals = root / "agent_proposals.json"
+            write_proposals(proposals, [{
+                "recording": "20260814-100000-020", "target_section": "Transcription",
+                "source_text": "normalword", "source_or_pattern": "normalword", "replacement": "canonical",
+                "replacement_risk": "none", "reason": "Agent proposal",
+            }])
+            output = root / "refinement.md"
+            result = run_build(recordings, replacements, output, "--proposals", str(proposals), "--protected-terms", str(protected))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            table = output.read_text(encoding="utf-8")
+            self.assertIn("| matched |", table)
+            self.assertIn("| review_required |", table)
+            self.assertIn("protected_term_match", table)
+            self.assertIn("protected_term_matches=matched:1", result.stdout)
+
+    def test_rejected_literal_can_be_protected_and_approved_import_removes_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            make_recording(
+                recordings,
+                "20260814-100000-021",
+                **{
+                    "transcription_text.txt": "normalword",
+                    "transcription_processed_text.txt": "canonical",
+                    "prompt_correction_text.txt": "same",
+                    "output_text.txt": "same",
+                },
+            )
+            replacements = root / "global_replacements.json"
+            write_json(replacements, empty_replacements())
+            protected = root / "protected.json"
+            write_json(protected, {"schema_version": 1, "entries": []})
+            proposals = root / "agent_proposals.json"
+            write_proposals(proposals, [{
+                "recording": "20260814-100000-021", "target_section": "Transcription",
+                "source_text": "normalword", "source_or_pattern": "normalword", "replacement": "canonical",
+                "replacement_risk": "common_term", "reason": "Agent proposal",
+            }])
+            refinement = root / "refinement.md"
+            result = run_build(recordings, replacements, refinement, "--proposals", str(proposals), "--protected-terms", str(protected))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            row_line = next(line for line in refinement.read_text(encoding="utf-8").splitlines() if line.startswith("| candidate-"))
+            candidate_id = row_line.split("|", 2)[1].strip()
+            rejected = refinement.read_text(encoding="utf-8").replace("| review_required |", "| rejected |", 1)
+            refinement.write_text(rejected, encoding="utf-8")
+            added = subprocess.run(
+                [sys.executable, str(MANAGE), "add", "--file", str(protected), "--refinement", str(refinement), "--candidate-id", candidate_id, "--reason", "正常用語"],
+                text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False,
+            )
+            self.assertEqual(added.returncode, 0, added.stderr)
+            self.assertEqual(len(json.loads(protected.read_text(encoding="utf-8"))["entries"]), 1)
+            reviewed = refinement.read_text(encoding="utf-8")
+            reviewed = reviewed.replace("<!-- replacement_mode: pending -->", "<!-- replacement_mode: mixed -->")
+            reviewed = reviewed.replace("<!-- target_file: -->", "<!-- target_file: global_replacements.json -->")
+            reviewed = reviewed.replace("| rejected |", "| approved |", 1)
+            reviewed = reviewed.replace("| pending |", "| mixed |", 1)
+            reviewed = reviewed.replace("|  |", "| global_replacements.json |", 1)
+            refinement.write_text(reviewed, encoding="utf-8")
+            command = [sys.executable, str(IMPORT), "--refinement", str(refinement), "--replacements", str(replacements), "--mode", "mixed", "--scope-file", str(root / "scope.json"), "--protected-terms", str(protected)]
+            dry = subprocess.run(command + ["--dry-run"], text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False)
+            self.assertEqual(dry.returncode, 0, dry.stderr)
+            self.assertIn("protected_terms_remove=1", dry.stdout)
+            self.assertEqual(len(json.loads(protected.read_text(encoding="utf-8"))["entries"]), 1)
+            imported = subprocess.run(command, text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False)
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            self.assertEqual(json.loads(protected.read_text(encoding="utf-8"))["entries"], [])
+            self.assertEqual(json.loads(replacements.read_text(encoding="utf-8"))["Transcription"]["Literals"], {"canonical": ["normalword"]})
+
+    def test_protected_terms_are_scoped_by_section(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            make_recording(recordings, "20260814-100000-022", **{
+                "transcription_text.txt": "sameword", "transcription_processed_text.txt": "targetword",
+                "prompt_correction_text.txt": "sameword", "output_text.txt": "targetword",
+            })
+            replacements = root / "global_replacements.json"
+            write_json(replacements, empty_replacements())
+            protected = root / "protected.json"
+            write_json(protected, {"schema_version": 1, "entries": [{
+                "target_section": "Transcription", "term": "sameword", "reason": "section-specific",
+                "added_at": "2026-08-14T00:00:00+00:00", "updated_at": "2026-08-14T00:00:00+00:00",
+                "source_candidate_id": "manual",
+            }]})
+            proposals = root / "agent_proposals.json"
+            write_proposals(proposals, [
+                {"recording": "20260814-100000-022", "target_section": section, "source_text": "sameword", "source_or_pattern": "sameword", "replacement": "targetword", "replacement_risk": "none"}
+                for section in ("Transcription", "FinalOutput")
+            ])
+            output = root / "refinement.md"
+            result = run_build(recordings, replacements, output, "--proposals", str(proposals), "--protected-terms", str(protected))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [line for line in output.read_text(encoding="utf-8").splitlines() if line.startswith("| candidate-")]
+            self.assertEqual(sum("| none | matched |" in row for row in rows), 1)
+            self.assertEqual(sum("| none | not_matched |" in row for row in rows), 1)
 
 
 if __name__ == "__main__":

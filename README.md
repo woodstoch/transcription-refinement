@@ -113,7 +113,21 @@ Agent 應完成來源分析與非破壞性驗證，並回報 `refinement.md`。�
 
 ### 第二步：人工審核候選
 
-使用者檢查 `refinement.md`，必要時要求回聽指定 Recording，修改候選內容，並將每列設為 `approved` 或 `rejected`。尚未決定的列保留 `pending`，Importer 會忽略它們。
+使用者檢查 `refinement.md`，必要時要求回聽指定 Recording，修改候選內容，並將每列設為 `approved` 或 `rejected`。`common_term`、`rare_or_domain`、`context_sensitive` 或命中不可替換詞表的列會先標為 `review_required`；它們仍完整保留，只有使用者決定後才改成 `approved`／`rejected`。尚未決定的列保留 `pending` 或 `review_required`，Importer 會忽略它們。
+
+若使用者判定某個 Literal 來源詞本身不可被 replacement，先將候選設為 `rejected`，再明確加入工作區的受保護詞表。第一次啟用時先初始化檔案：
+
+```bash
+python3 <resolved-installed-skill-root>/scripts/manage_protected_terms.py init \
+  --file global_replacements.protected_terms.json
+
+python3 <resolved-installed-skill-root>/scripts/manage_protected_terms.py add \
+  --file global_replacements.protected_terms.json \
+  --refinement refinement.md --candidate-id <candidate-id> \
+  --reason "正常用語，不應被全域替換"
+```
+
+詞表只保存依 `target_section` 區分的 Literal；`entries[].term` 是受保護字詞。命中時 `refinement.md` 的 `protected_term_match` 會顯示 `matched`。若使用者之後仍核准同一個 replacement，正式匯入會在第二次確認後同步移除該保護項。
 
 ### 第三步：選擇 mixed 並執行 dry-run
 
@@ -148,6 +162,7 @@ RECORDINGS_DIR="<recordings-directory>"
 GLOBAL_REPLACEMENTS_FILE="<path>/global_replacements.json"
 MODEL_REPLACEMENTS_FILE="<existing-model-specific-file>"
 SCOPE_FILE="<scope-sidecar-file>"
+PROTECTED_TERMS_FILE="<protected-terms-file>"
 PROPOSALS_FILE="<agent-proposals-file>"
 REFINEMENT_FILE="<refinement-output-file>"
 ```
@@ -160,6 +175,7 @@ python3 "$SKILL_ROOT/scripts/build_refinement.py" \
   --recordings "$RECORDINGS_DIR" \
   --replacements "$GLOBAL_REPLACEMENTS_FILE" \
   --scope-file "$SCOPE_FILE" \
+  --protected-terms "$PROTECTED_TERMS_FILE" \
   --proposals "$PROPOSALS_FILE" \
   --output "$REFINEMENT_FILE"
 ```
@@ -188,6 +204,7 @@ python3 "$SKILL_ROOT/scripts/import_replacements.py" \
   --mode mixed \
   --replacements "$GLOBAL_REPLACEMENTS_FILE" \
   --scope-file "$SCOPE_FILE" \
+  --protected-terms "$PROTECTED_TERMS_FILE" \
   --dry-run
 ```
 
@@ -204,6 +221,7 @@ python3 "$SKILL_ROOT/scripts/import_replacements.py" \
   --profile "$MODEL_PROFILE" \
   --replacements "$MODEL_REPLACEMENTS_FILE" \
   --scope-file "$SCOPE_FILE" \
+  --protected-terms "$PROTECTED_TERMS_FILE" \
   --dry-run
 ```
 
@@ -216,7 +234,8 @@ python3 "$SKILL_ROOT/scripts/import_replacements.py" \
 - `skills/transcription-refinement/SKILL.md`：Skill 行為與安全規則
 - `skills/transcription-refinement/README.md`：Skill 內部流程摘要
 - `skills/transcription-refinement/scripts/`：建置與匯入腳本
-- `skills/transcription-refinement/references/`：runtime 與 scope schema
+- `skills/transcription-refinement/references/`：runtime、scope、refinement 欄位與 protected terms schema
 - `skills/transcription-refinement/tests/`：工作流程測試
+- `skills/transcription-refinement/scripts/manage_protected_terms.py`：受保護 Literal 詞表管理
 
 本 repository 不包含 Recording、音訊、`global_replacements.json`、官方 schema 或 ZeroType App 設定。

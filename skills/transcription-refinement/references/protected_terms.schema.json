@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "Transcription Refinement protected terms",
+  "description": "Skill-owned terms that must not be used as Literal replacement sources unless the operator explicitly removes the protection.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "enum": [1] },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/entry" }
+    }
+  },
+  "required": ["schema_version", "entries"],
+  "definitions": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target_section": { "enum": ["Transcription", "FinalOutput"] },
+        "term": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "added_at": { "type": "string", "minLength": 1 },
+        "updated_at": { "type": "string", "minLength": 1 },
+        "source_candidate_id": { "type": "string", "minLength": 1 }
+      },
+      "required": ["target_section", "term", "reason", "added_at", "updated_at", "source_candidate_id"]
+    }
+  }
+}

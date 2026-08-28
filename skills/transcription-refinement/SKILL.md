@@ -52,11 +52,11 @@ python3 skills/transcription-refinement/scripts/build_refinement.py \
 
 Without `--proposals`, the script produces an empty review table plus evidence/model statistics. It reports observed downstream differences as hints only; it never turns those differences into candidates.
 
-The generated `refinement.md` displays four adjacent field groups: proposal/review, downstream validation, model audit, and import routing/system audit. `target_section` decides the replacement section; `review_stage` only identifies the evidence stage. `candidate_id` is the human row index; `proposal_fingerprint` is a system integrity value and should not be edited.
+The generated `refinement.md` begins with selection metadata: `selection_mode`, `selected_count`, `selected_from`, and `selected_to`. `selected_from` is the oldest selected Recording and `selected_to` is the newest; the values describe the actual selected directories, not every timestamp between them. Chat must repeat this range in its summary. The table then displays four adjacent field groups: proposal/review, downstream validation, model audit, and import routing/system audit. `target_section` decides the replacement section; `review_stage` only identifies the evidence stage. `candidate_id` is the human row index; `proposal_fingerprint` is a system integrity value and should not be edited.
 
-The proposal/review group contains the Agent proposal fields, `replacement_risk`, `protected_term_match`, and `review_status` (`pending`, `review_required`, `approved`, or `rejected`). A non-`none` risk, a protected-term hit, or an unchecked protected-term file starts at `review_required`; this is an audit gate, not confidence. The validation group is informational and cannot replace proposal values. Model and routing fields are generated or selected for audit and import scope.
+The proposal/review group contains the Agent proposal fields, `replacement_risk`, `protected_term_match`, `review_status` (`pending`, `review_required`, `approved`, or `rejected`), and the operator-only `protected_term_action`. A non-`none` risk, a protected-term hit, or an unchecked protected-term file starts at `review_required`; this is an audit gate, not confidence. The validation group is informational and cannot replace proposal values. Model and routing fields are generated or selected for audit and import scope.
 
-Protected terms are exact Literal sources scoped independently to `Transcription` or `FinalOutput`. A match remains visible in the table and is never auto-rejected. If the user explicitly rejects a Literal candidate as unsafe, add it with:
+Protected terms are exact Literal sources scoped independently to `Transcription` or `FinalOutput`. A match remains visible in the table and is never auto-rejected. The Agent must leave `protected_term_action` blank; after review, the user may set it to the exact value `add` only when also setting `review_status=rejected` for a Literal row. This request is applied by the Importer after dry-run and second confirmation. If the protected terms file is missing, that confirmed import creates a valid `schema_version=1` file before adding the term. The existing direct management command remains available:
 
 ```bash
 python3 skills/transcription-refinement/scripts/manage_protected_terms.py add \
@@ -73,7 +73,7 @@ After building, Chat must summarize selected range, full/partial/missing evidenc
 
 ## Human review and import gate
 
-The user reviews each row, may edit it, may listen to the linked audio, and sets `review_status=approved` or `rejected`. Only `approved` rows can be imported. No confidence rating is required.
+The user reviews each row, may edit it, may listen to the linked audio, and sets `review_status=approved` or `rejected`. `review_status` is a per-row decision; only `approved` rows can be imported. `replacement_mode` is a batch-level choice set once in the metadata comment (`mixed` or `separate`), with `target_file` identifying the destination. The table routing cells must mirror those batch values for Importer consistency. No confidence rating is required.
 
 Set one mode for the batch:
 
@@ -100,6 +100,6 @@ python3 skills/transcription-refinement/scripts/import_replacements.py \
   --protected-terms global_replacements.protected_terms.json --dry-run
 ```
 
-Dry-run reports mode, profile, target file, both sections’ additions/duplicates/conflicts, protected terms scheduled for removal, validation warnings, and cross-model warnings without writing replacement JSON, scope metadata, or the protected-term file. CLI mode/profile/target must match the batch and every row. Regex objects and both replacement sections are validated before and after import. Pending/review_required/rejected rows are ignored; duplicate approved rows remain visible in the report but are not written twice. An approved Literal that still matches the live protected-term file removes that protection only during the confirmed formal import.
+Dry-run reports mode, profile, target file, both sections’ additions/duplicates/conflicts, protected terms scheduled for addition/removal, whether a missing protected terms file would be created, validation warnings, and cross-model warnings without writing replacement JSON, scope metadata, or the protected-term file. CLI mode/profile/target must match the batch and every row. Regex objects and both replacement sections are validated before and after import. Pending/review_required/rejected rows are ignored for replacement import; rejected rows with `protected_term_action=add` are processed only as protected-term requests. Duplicate approved rows remain visible in the report but are not written twice. An approved Literal that still matches the live protected-term file removes that protection only during the confirmed formal import.
 
 Never modify recordings, `appsettings.Local.json`, the official schema, the app bundle, or ZeroType settings.

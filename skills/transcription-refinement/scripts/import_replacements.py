@@ -18,6 +18,7 @@ from typing import Any
 
 ROW_SPLIT = re.compile(r"(?<!\\)\|")
 APPROVED_STATUSES = {"approved", "keep", "採用", "通過"}
+PROTECTED_TERM_ACTIONS = {"", "add"}
 TARGET_SECTIONS = ("Transcription", "FinalOutput")
 RUNTIME_SCHEMA = Path(__file__).resolve().parents[1] / "references" / "global_replacements.runtime.schema.json"
 SCOPE_SCHEMA = Path(__file__).resolve().parents[1] / "references" / "global_replacements.scope.schema.json"
@@ -49,6 +50,7 @@ class ApprovedRow:
     validation_status: str
     validation_note: str
     review_status: str
+    protected_term_action: str
     replacement_mode: str
     target_file: str
 
@@ -133,6 +135,27 @@ def save_protected_terms(path: Path, entries: dict[tuple[str, str], dict[str, st
     path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def protected_term_reason(row: ApprovedRow) -> str:
+    candidate = row.candidate_id or "manual"
+    proposal_reason = row.reason or "未提供候選理由"
+    return (
+        "由使用者在 refinement.md 明確指定 protected_term_action=add；"
+        f"candidate_id={candidate}；原候選理由：{proposal_reason}"
+    )
+
+
+def protected_term_entry(row: ApprovedRow, timestamp: str) -> dict[str, str]:
+    term = normalize_term(row.source.strip())
+    return {
+        "target_section": row.target_section,
+        "term": term,
+        "reason": protected_term_reason(row),
+        "added_at": timestamp,
+        "updated_at": timestamp,
+        "source_candidate_id": row.candidate_id or "manual",
+    }
+
+
 def proposal_fingerprint(
     target_section: str,
     rule_type: str,
@@ -166,6 +189,7 @@ def approved_pairs(path: Path) -> list[ApprovedRow]:
     reason_index: int | None = None
     replacement_risk_index: int | None = None
     protected_term_match_index: int | None = None
+    protected_term_action_index: int | None = None
     evidence_status_index: int | None = None
     downstream_observed_index: int | None = None
     validation_status_index: int | None = None
@@ -205,6 +229,7 @@ def approved_pairs(path: Path) -> list[ApprovedRow]:
             reason_index = header.get("reason")
             replacement_risk_index = header.get("replacement_risk")
             protected_term_match_index = header.get("protected_term_match")
+            protected_term_action_index = header.get("protected_term_action")
             evidence_status_index = header.get("evidence_status")
             downstream_observed_index = header.get("downstream_observed")
             validation_status_index = header.get("validation_status")
@@ -220,19 +245,25 @@ def approved_pairs(path: Path) -> list[ApprovedRow]:
                 continue
             target_section = (
                 cells[section_index].strip()
-                if section_index is not None and section_index < len(cells) and cells[section_index].strip()
+                if section_index is not None and section_index < len(cells)
                 else "Transcription"
             )
             rule_type = cells[type_index].strip() if type_index is not None and type_index < len(cells) else "Literal"
             source = cells[source_index]
             target = cells[target_index]
             status = cells[status_index].strip().casefold() if status_index is not None and status_index < len(cells) else ""
+            protected_term_action = (
+                cells[protected_term_action_index].strip()
+                if protected_term_action_index is not None and protected_term_action_index < len(cells)
+                else ""
+            )
         else:
             # Backward-compatible legacy table: timestamp | source | target | remark
             _, source, target = cells[:3]
             target_section = "Transcription"
             rule_type = "Literal"
             status = ""
+            protected_term_action = ""
             timestamp_index = 0
             candidate_id_index = None
             proposal_fingerprint_index = None
@@ -240,6 +271,7 @@ def approved_pairs(path: Path) -> list[ApprovedRow]:
             reason_index = None
             replacement_risk_index = None
             protected_term_match_index = None
+            protected_term_action_index = None
             evidence_status_index = None
             downstream_observed_index = None
             validation_status_index = None
@@ -251,9 +283,9 @@ def approved_pairs(path: Path) -> list[ApprovedRow]:
             evidence_index = None
             mode_index = None
             target_file_index = None
-        if status and status not in APPROVED_STATUSES:
+        if status and status not in APPROVED_STATUSES and not protected_term_action:
             continue
-        if source and target:
+        if (source and target) or protected_term_action:
             def cell_at(index: int | None, default: str = "") -> str:
                 return cells[index].strip() if index is not None and index < len(cells) else default
 
@@ -281,6 +313,7 @@ def approved_pairs(path: Path) -> list[ApprovedRow]:
                     validation_status=cell_at(validation_status_index),
                     validation_note=cell_at(validation_note_index),
                     review_status=status or "approved",
+                    protected_term_action=protected_term_action,
                     replacement_mode=cell_at(mode_index, "pending") or "pending",
                     target_file=cell_at(target_file_index),
                 )
@@ -610,8 +643,37 @@ def main() -> int:
         for row in pairs
     )
     if not pairs:
-        print("無需匯入 approved_pairs=0; no changes written")
+        print("無需匯入 approved_pairs=0 protected_term_requests=0; no changes written")
         return 0
+
+    approved_rows = [row for row in pairs if row.review_status in APPROVED_STATUSES]
+    protected_add_requests = [row for row in pairs if row.protected_term_action]
+    try:
+        for row in pairs:
+            if row.protected_term_action not in PROTECTED_TERM_ACTIONS:
+                raise ValueError(
+                    f"line {row.line_number}: protected_term_action must be blank or exact 'add'"
+                )
+        for row in protected_add_requests:
+            if row.review_status != "rejected":
+                raise ValueError(
+                    f"line {row.line_number}: protected_term_action=add requires review_status=rejected"
+                )
+            if row.rule_type.casefold() != "literal":
+                raise ValueError(
+                    f"line {row.line_number}: protected_term_action=add requires rule_type=Literal"
+                )
+            if row.target_section not in TARGET_SECTIONS:
+                raise ValueError(
+                    f"line {row.line_number}: protected_term_action=add requires a valid target_section"
+                )
+            if not row.source.strip():
+                raise ValueError(
+                    f"line {row.line_number}: protected_term_action=add requires a non-empty source_or_pattern"
+                )
+    except ValueError as error:
+        print(f"error: invalid protected term action: {error}", file=sys.stderr)
+        return 2
 
     owners = {section: source_owners(sections[section][0]) for section in TARGET_SECTIONS}
     regex_rule_owners = {section: regex_owners(sections[section][1]) for section in TARGET_SECTIONS}
@@ -624,6 +686,8 @@ def main() -> int:
     cross_model_scope_warnings = 0
     legacy_unscoped_warnings = 0
     protected_removals: dict[tuple[str, str], dict[str, str]] = {}
+    protected_additions: dict[tuple[str, str], dict[str, str]] = {}
+    protected_add_duplicates = 0
 
     def queue_protected_removal(row: ApprovedRow) -> None:
         if row.rule_type == "Literal" and protected_terms_checked:
@@ -643,7 +707,7 @@ def main() -> int:
         section_conflicts[row.target_section] += 1
         conflicts.append(message)
 
-    for row in pairs:
+    for row in approved_rows:
         target_section = row.target_section
         rule_type = row.rule_type
         source = row.source
@@ -750,6 +814,32 @@ def main() -> int:
         owners[target_section][source_key].add(target)
         queue_protected_removal(row)
 
+    protected_add_source_conflicts: list[str] = []
+    for row in protected_add_requests:
+        key = (row.target_section, normalize_term(row.source.strip()))
+        if key[1].casefold() in owners[row.target_section]:
+            protected_add_source_conflicts.append(
+                f"line {row.line_number}: protected term {row.source!r} conflicts with an existing "
+                f"{row.target_section} replacement source"
+            )
+        pending_sources = {
+            source.casefold()
+            for sources in additions[row.target_section].values()
+            for source in sources
+        }
+        if key[1].casefold() in pending_sources:
+            protected_add_source_conflicts.append(
+                f"line {row.line_number}: protected term {row.source!r} conflicts with a replacement "
+                f"approved in this batch for {row.target_section}"
+            )
+        if key in protected_terms or key in protected_additions:
+            protected_add_duplicates += 1
+        elif key not in protected_additions:
+            protected_additions[key] = protected_term_entry(
+                row, datetime.now(timezone.utc).isoformat()
+            )
+
+    conflicts.extend(protected_add_source_conflicts)
     if conflicts:
         print(
             "conflicts detected; no changes written: "
@@ -768,9 +858,12 @@ def main() -> int:
     if args.dry_run:
         print(
             f"dry_run mode={args.mode} profile={args.profile or '-'} target_file={args.replacements} "
-            f"approved_pairs={len(pairs)} total_add={added} skip={skipped} "
+            f"approved_pairs={len(approved_rows)} protected_term_requests={len(protected_add_requests)} total_add={added} skip={skipped} "
             f"proposal_modified_after_review={modified_after_review} "
             f"protected_terms_checked={str(protected_terms_checked).lower()} "
+            f"protected_terms_file_missing={str(not protected_terms_checked).lower()} "
+            f"protected_terms_create={int(bool(protected_additions) and not protected_terms_checked)} "
+            f"protected_terms_add={len(protected_additions)} protected_terms_duplicate={protected_add_duplicates} "
             f"protected_terms_remove={len(protected_removals)} "
             + " ".join(
                 f"{section.lower()}_literal_add={literal_counts[section]} "
@@ -795,6 +888,8 @@ def main() -> int:
                 print(f"Regex {pattern}: {replacement}")
         for section, term in sorted(protected_removals):
             print(f"protected term remove {section}: {term}")
+        for section, term in sorted(protected_additions):
+            print(f"protected term add {section}: {term}")
         return 0
 
     for section in TARGET_SECTIONS:
@@ -804,39 +899,48 @@ def main() -> int:
             literals.setdefault(canonical_target, []).extend(sources)
         regex_rules.extend({"Pattern": pattern, "Replacement": replacement} for pattern, replacement in regex_additions[section])
 
-    args.replacements.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    try:
-        written = json.loads(args.replacements.read_text(encoding="utf-8"))
-        for section in TARGET_SECTIONS:
-            validate_section(written[section], section)
-    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-        print(f"error: imported JSON failed validation: {error}", file=sys.stderr)
-        return 1
-    updated_scope = update_scope_registry(scope_registry, pairs, args.mode, args.replacements, args.profile)
-    args.scope_file.write_text(json.dumps(updated_scope, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    try:
-        load_scope_registry(args.scope_file)
-    except (OSError, UnicodeError, ValueError) as error:
-        print(f"error: updated scope sidecar failed validation: {error}", file=sys.stderr)
-        return 1
-    if protected_removals:
-        if not protected_terms_checked:
+    if added:
+        args.replacements.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        try:
+            written = json.loads(args.replacements.read_text(encoding="utf-8"))
+            for section in TARGET_SECTIONS:
+                validate_section(written[section], section)
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            print(f"error: imported JSON failed validation: {error}", file=sys.stderr)
+            return 1
+    if approved_rows:
+        updated_scope = update_scope_registry(scope_registry, approved_rows, args.mode, args.replacements, args.profile)
+        args.scope_file.write_text(json.dumps(updated_scope, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        try:
+            load_scope_registry(args.scope_file)
+        except (OSError, UnicodeError, ValueError) as error:
+            print(f"error: updated scope sidecar failed validation: {error}", file=sys.stderr)
+            return 1
+    else:
+        updated_scope = scope_registry
+    if protected_removals or protected_additions:
+        if protected_removals and not protected_terms_checked:
             print("error: protected term removals requested but protected terms file was not checked", file=sys.stderr)
             return 1
-        remaining = {
+        updated_protected_terms = {
             key: entry for key, entry in protected_terms.items() if key not in protected_removals
         }
+        updated_protected_terms.update(protected_additions)
         try:
-            save_protected_terms(args.protected_terms, remaining)
+            save_protected_terms(args.protected_terms, updated_protected_terms)
             load_protected_terms(args.protected_terms)
         except (OSError, UnicodeError, ValueError) as error:
             print(f"error: protected terms update failed after replacement import: {error}", file=sys.stderr)
             return 1
     print(
         f"imported mode={args.mode} profile={args.profile or '-'} target_file={args.replacements} "
-        f"approved_pairs={len(pairs)} total_add={added} skip={skipped} "
+        f"approved_pairs={len(approved_rows)} protected_term_requests={len(protected_add_requests)} total_add={added} skip={skipped} "
         f"proposal_modified_after_review={modified_after_review} "
-        f"protected_terms_checked={str(protected_terms_checked).lower()} protected_terms_remove={len(protected_removals)} "
+        f"protected_terms_checked={str(protected_terms_checked).lower()} "
+        f"protected_terms_file_missing={str(not protected_terms_checked).lower()} "
+        f"protected_terms_create={int(bool(protected_additions) and not protected_terms_checked)} "
+        f"protected_terms_add={len(protected_additions)} protected_terms_duplicate={protected_add_duplicates} "
+        f"protected_terms_remove={len(protected_removals)} "
         + " ".join(
             f"{section.lower()}_literal_add={literal_counts[section]} "
             f"{section.lower()}_regex_add={regex_counts[section]} "

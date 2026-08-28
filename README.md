@@ -1,6 +1,6 @@
 # ZeroType Transcription Refinement
 
-這個 repository 提供 ZeroType 的 `transcription-refinement` Skill。Agent 會分析 deterministic replacement 前的 Recording 文字，整理 `Transcription` 與 `FinalOutput` 候選，最後由使用者人工審核。
+這個 repository 提供 ZeroType 的 `transcription-refinement` Skill。Agent 會分析 deterministic replacement 前的 Recording 文字，整理 `Transcription` 與 `FinalOutput` 候選，最後由使用者人工審核。下游處理結果只作非破壞性驗證，不會反向改寫或刪除 Agent 提議。
 
 完整的判定、驗證與匯入規則以 [`skills/transcription-refinement/SKILL.md`](skills/transcription-refinement/SKILL.md) 為準；本 README 只說明安裝與實際操作入口。
 
@@ -46,6 +46,14 @@ npx skills remove transcription-refinement --yes
 
 `--copy` 會複製 Skill，而不是建立 symlink。Global 與 project 的實際安裝位置均由 `npx skills` 及 Agent 管理，不要假設固定目錄。只有直接 checkout 本 repository 時，Skill 路徑才是 `<repo-root>/skills/transcription-refinement`。
 
+## 最新版行為
+
+- `Transcription` 候選只來自 `transcription_text.txt`；`FinalOutput` 候選只來自 `prompt_correction_text.txt`。
+- `transcription_processed_text.txt`、`output_text.txt` 與既有 replacement 只提供驗證、duplicate 與 conflict 註記。
+- 建置後的 `refinement.md` 表格前會保存 `selection_mode`、`selected_count`、`selected_from`、`selected_to`，Chat 摘要也應顯示相同範圍。
+- `review_status` 是逐列人工決定；`replacement_mode` 是整批一次選擇的 `mixed` 或 `separate`。完整欄位定義請見 [`references/refinement-format.md`](skills/transcription-refinement/references/refinement-format.md)。
+- protected terms 不需要先手動初始化；只有使用者在 `rejected` 的 Literal 列填入 `protected_term_action=add`，正式確認匯入時才會建立或更新詞表。
+
 ## 一般使用流程
 
 多數使用者只需要依序使用三個提示詞。舊版 Recording fallback、模型分布與證據狀態都由 Skill 在同一次整理中處理，不需要拆成不同模式。
@@ -57,7 +65,7 @@ npx skills remove transcription-refinement --yes
 整理目前 ZeroType workspace 中最新 <COUNT> 份 Recording。
 
 預設同時分析 Transcription 與 FinalOutput；遇到舊版資料時依 Skill 的 fallback 規則處理。
-建立 agent_proposals.json 與 refinement.md，顯示證據與模型摘要，
+建立 agent_proposals.json 與 refinement.md，顯示選取範圍、證據與模型摘要，
 然後停在人工審核階段，不要匯入。
 ```
 
@@ -115,19 +123,13 @@ Agent 應完成來源分析與非破壞性驗證，並回報 `refinement.md`。�
 
 使用者檢查 `refinement.md`，必要時要求回聽指定 Recording，修改候選內容，並將每列設為 `approved` 或 `rejected`。`common_term`、`rare_or_domain`、`context_sensitive` 或命中不可替換詞表的列會先標為 `review_required`；它們仍完整保留，只有使用者決定後才改成 `approved`／`rejected`。尚未決定的列保留 `pending` 或 `review_required`，Importer 會忽略它們。
 
-若使用者判定某個 Literal 來源詞本身不可被 replacement，先將候選設為 `rejected`，再明確加入工作區的受保護詞表。第一次啟用時先初始化檔案：
+若使用者判定某個 Literal 來源詞本身不可被 replacement，先將候選設為 `rejected`，再在同一列將 `protected_term_action` 填為精確值 `add`：
 
 ```bash
-python3 <resolved-installed-skill-root>/scripts/manage_protected_terms.py init \
-  --file global_replacements.protected_terms.json
-
-python3 <resolved-installed-skill-root>/scripts/manage_protected_terms.py add \
-  --file global_replacements.protected_terms.json \
-  --refinement refinement.md --candidate-id <candidate-id> \
-  --reason "正常用語，不應被全域替換"
+protected_term_action=add
 ```
 
-詞表只保存依 `target_section` 區分的 Literal；`entries[].term` 是受保護字詞。命中時 `refinement.md` 的 `protected_term_match` 會顯示 `matched`。若使用者之後仍核准同一個 replacement，正式匯入會在第二次確認後同步移除該保護項。
+詞表只保存依 `target_section` 區分的 Literal；`entries[].term` 是受保護字詞。命中時 `refinement.md` 的 `protected_term_match` 會顯示 `matched`。dry-run 只預覽建立或加入；第二次確認後的正式匯入才會寫檔。若使用者之後仍核准同一個 replacement，正式匯入會同步移除該保護項。需要直接管理詞表時，才使用 `manage_protected_terms.py`。
 
 ### 第三步：選擇 mixed 並執行 dry-run
 
@@ -135,7 +137,7 @@ python3 <resolved-installed-skill-root>/scripts/manage_protected_terms.py add \
 
 ```text
 這批使用 mixed 模式，目標是 global_replacements.json。
-請更新 refinement.md 的 batch 與 approved rows routing，執行唯讀 dry-run，
+請在 refinement.md 設定 batch 與 approved rows routing，執行唯讀 dry-run，
 回報 Transcription、FinalOutput 的新增、duplicate、conflict 與模型 scope 警告。
 不要正式匯入。
 ```
@@ -187,6 +189,7 @@ python3 "$SKILL_ROOT/scripts/build_refinement.py" \
 匯入前必須完成以下準備：
 
 - 使用者已將候選設為 `approved` 或 `rejected`；Importer 只讀取 `approved` rows。
+- `review_status` 是逐列欄位；`replacement_mode` 與 `target_file` 是整批 routing 設定，表格列值必須與表頭及 CLI 一致。
 - `refinement.md` 包含正確的 batch routing 註解：
 
 ```text
@@ -238,4 +241,4 @@ python3 "$SKILL_ROOT/scripts/import_replacements.py" \
 - `skills/transcription-refinement/tests/`：工作流程測試
 - `skills/transcription-refinement/scripts/manage_protected_terms.py`：受保護 Literal 詞表管理
 
-本 repository 不包含 Recording、音訊、`global_replacements.json`、官方 schema 或 ZeroType App 設定。
+本 repository 不包含 Recording、音訊、`global_replacements.json`、protected terms 實例、官方 schema 或 ZeroType App 設定。

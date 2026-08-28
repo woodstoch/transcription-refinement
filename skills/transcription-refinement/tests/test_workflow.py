@@ -55,6 +55,30 @@ def run_build(recordings: Path, replacements: Path, output: Path, *extra: str) -
     )
 
 
+def run_build_count(recordings: Path, replacements: Path, output: Path, count: int) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return subprocess.run(
+        [sys.executable, str(BUILD), "--count", str(count), "--recordings", str(recordings), "--replacements", str(replacements), "--output", str(output)],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+
+def update_first_candidate(path: Path, **updates: str) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header_index = next(index for index, line in enumerate(lines) if line.startswith("| candidate_id |"))
+    headers = [cell.strip() for cell in lines[header_index].strip("|").split("|")]
+    row_index = next(index for index, line in enumerate(lines) if line.startswith("| candidate-"))
+    cells = [cell.strip() for cell in lines[row_index].strip("|").split("|")]
+    for name, value in updates.items():
+        cells[headers.index(name)] = value
+    lines[row_index] = "| " + " | ".join(cells) + " |"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 class WorkflowTests(unittest.TestCase):
     def test_runtime_schema_declares_observed_object_regex(self) -> None:
         schema = json.loads(RUNTIME_SCHEMA.read_text(encoding="utf-8"))
@@ -119,7 +143,11 @@ class WorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             table = output.read_text(encoding="utf-8")
-            self.assertIn("| candidate_id | target_section | recording | timestamp | replacement_risk | protected_term_match | review_status | source_text | source_or_pattern | replacement |", table)
+            self.assertIn("<!-- selection_mode: all -->", table)
+            self.assertIn("<!-- selected_count: 1 -->", table)
+            self.assertIn("<!-- selected_from: 20260814-100000-001 -->", table)
+            self.assertIn("<!-- selected_to: 20260814-100000-001 -->", table)
+            self.assertIn("| candidate_id | target_section | recording | timestamp | replacement_risk | protected_term_match | review_status | protected_term_action | source_text | source_or_pattern | replacement |", table)
             self.assertIn("| Transcription | 20260814-100000-001 |", table)
             self.assertIn("| FinalOutput | 20260814-100000-001 |", table)
             self.assertIn("## 欄位分組（由左至右）", table)
@@ -171,7 +199,7 @@ class WorkflowTests(unittest.TestCase):
                 headers,
                 [
                     "candidate_id", "target_section", "recording", "timestamp", "replacement_risk", "protected_term_match",
-                    "review_status", "source_text", "source_or_pattern", "replacement", "rule_type", "reason",
+                    "review_status", "protected_term_action", "source_text", "source_or_pattern", "replacement", "rule_type", "reason",
                     "evidence_status", "downstream_observed",
                     "validation_status", "validation_note", "transcription_engine", "transcription_model",
                     "correction_model", "model_profile", "model_evidence", "replacement_mode", "target_file",
@@ -193,6 +221,50 @@ class WorkflowTests(unittest.TestCase):
             rerun_cells = [cell.strip() for cell in rerun_row.strip("|").split("|")]
             self.assertEqual(rerun_cells[headers.index("candidate_id")], row["candidate_id"])
             self.assertEqual(rerun_cells[headers.index("proposal_fingerprint")], row["proposal_fingerprint"])
+
+    def test_refinement_records_all_selection_range(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            for name in ("20260814-100000-030", "20260814-100000-031", "20260814-100000-032"):
+                make_recording(recordings, name, **{
+                    "transcription_text.txt": "same",
+                    "prompt_correction_text.txt": "same",
+                })
+            replacements = root / "global_replacements.json"
+            write_json(replacements, empty_replacements())
+            output = root / "refinement.md"
+            result = run_build(recordings, replacements, output, "--all", "--since", "20260814-100000-030", "--until", "20260814-100000-031")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            table = output.read_text(encoding="utf-8")
+            self.assertIn("<!-- selection_mode: all -->", table)
+            self.assertIn("<!-- selected_count: 2 -->", table)
+            self.assertIn("<!-- selected_from: 20260814-100000-030 -->", table)
+            self.assertIn("<!-- selected_to: 20260814-100000-031 -->", table)
+            self.assertIn("selected_range=20260814-100000-030..20260814-100000-031", result.stdout)
+
+    def test_refinement_records_count_selection_range(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            for name in ("20260814-100000-040", "20260814-100000-041", "20260814-100000-042"):
+                make_recording(recordings, name, **{
+                    "transcription_text.txt": "same",
+                    "prompt_correction_text.txt": "same",
+                })
+            replacements = root / "global_replacements.json"
+            write_json(replacements, empty_replacements())
+            output = root / "refinement.md"
+            result = run_build_count(recordings, replacements, output, 2)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            table = output.read_text(encoding="utf-8")
+            self.assertIn("<!-- selection_mode: count -->", table)
+            self.assertIn("<!-- selected_count: 2 -->", table)
+            self.assertIn("<!-- selected_from: 20260814-100000-041 -->", table)
+            self.assertIn("<!-- selected_to: 20260814-100000-042 -->", table)
+            self.assertIn("selected_range=20260814-100000-041..20260814-100000-042", result.stdout)
 
     def test_duplicates_are_checked_within_each_section(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -792,10 +864,8 @@ class WorkflowTests(unittest.TestCase):
             reviewed = refinement.read_text(encoding="utf-8")
             reviewed = reviewed.replace("<!-- replacement_mode: pending -->", "<!-- replacement_mode: mixed -->")
             reviewed = reviewed.replace("<!-- target_file: -->", "<!-- target_file: global_replacements.json -->")
-            reviewed = reviewed.replace("| review_required |", "| approved |", 1)
-            reviewed = reviewed.replace("| pending |", "| mixed |", 1)
-            reviewed = reviewed.replace("|  |", "| global_replacements.json |", 1)
             refinement.write_text(reviewed, encoding="utf-8")
+            update_first_candidate(refinement, review_status="approved", replacement_mode="mixed", target_file="global_replacements.json")
             env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
             dry = subprocess.run(
                 [sys.executable, str(IMPORT), "--refinement", str(refinement), "--replacements", str(replacements), "--mode", "mixed", "--scope-file", str(root / "scope.json"), "--dry-run"],
@@ -931,10 +1001,8 @@ class WorkflowTests(unittest.TestCase):
             reviewed = refinement.read_text(encoding="utf-8")
             reviewed = reviewed.replace("<!-- replacement_mode: pending -->", "<!-- replacement_mode: mixed -->")
             reviewed = reviewed.replace("<!-- target_file: -->", "<!-- target_file: global_replacements.json -->")
-            reviewed = reviewed.replace("| rejected |", "| approved |", 1)
-            reviewed = reviewed.replace("| pending |", "| mixed |", 1)
-            reviewed = reviewed.replace("|  |", "| global_replacements.json |", 1)
             refinement.write_text(reviewed, encoding="utf-8")
+            update_first_candidate(refinement, review_status="approved", replacement_mode="mixed", target_file="global_replacements.json")
             command = [sys.executable, str(IMPORT), "--refinement", str(refinement), "--replacements", str(replacements), "--mode", "mixed", "--scope-file", str(root / "scope.json"), "--protected-terms", str(protected)]
             dry = subprocess.run(command + ["--dry-run"], text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False)
             self.assertEqual(dry.returncode, 0, dry.stderr)
@@ -973,6 +1041,193 @@ class WorkflowTests(unittest.TestCase):
             rows = [line for line in output.read_text(encoding="utf-8").splitlines() if line.startswith("| candidate-")]
             self.assertEqual(sum("| none | matched |" in row for row in rows), 1)
             self.assertEqual(sum("| none | not_matched |" in row for row in rows), 1)
+
+    def test_rejected_action_creates_missing_protected_file_on_formal_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            make_recording(recordings, "20260814-100000-023", **{
+                "transcription_text.txt": "normalword", "transcription_processed_text.txt": "canonical",
+                "prompt_correction_text.txt": "same", "output_text.txt": "same",
+            })
+            replacements = root / "global_replacements.json"
+            write_json(replacements, empty_replacements())
+            before_replacements = replacements.read_text(encoding="utf-8")
+            proposals = root / "agent_proposals.json"
+            write_proposals(proposals, [{
+                "recording": "20260814-100000-023", "target_section": "Transcription",
+                "source_text": "normalword", "source_or_pattern": "normalword", "replacement": "canonical",
+                "replacement_risk": "common_term", "protected_term_action": "add", "reason": "Agent proposal",
+            }])
+            refinement = root / "refinement.md"
+            build = run_build(recordings, replacements, refinement, "--proposals", str(proposals))
+            self.assertEqual(build.returncode, 0, build.stderr)
+            row_line = next(line for line in refinement.read_text(encoding="utf-8").splitlines() if line.startswith("| candidate-"))
+            headers = [cell.strip() for cell in next(line for line in refinement.read_text(encoding="utf-8").splitlines() if line.startswith("| candidate_id |")).strip("|").split("|")]
+            row = dict(zip(headers, [cell.strip() for cell in row_line.strip("|").split("|")]))
+            self.assertEqual(row["protected_term_action"], "")
+            refinement_text = refinement.read_text(encoding="utf-8").replace("<!-- replacement_mode: pending -->", "<!-- replacement_mode: mixed -->").replace("<!-- target_file: -->", "<!-- target_file: global_replacements.json -->")
+            refinement.write_text(refinement_text, encoding="utf-8")
+            update_first_candidate(refinement, review_status="rejected", protected_term_action="add", replacement_mode="mixed", target_file="global_replacements.json")
+            protected = root / "global_replacements.protected_terms.json"
+            scope = root / "scope.json"
+            command = [sys.executable, str(IMPORT), "--refinement", str(refinement), "--replacements", str(replacements), "--mode", "mixed", "--scope-file", str(scope), "--protected-terms", str(protected)]
+            dry = subprocess.run(command + ["--dry-run"], text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False)
+            self.assertEqual(dry.returncode, 0, dry.stderr)
+            self.assertIn("protected_terms_file_missing=true", dry.stdout)
+            self.assertIn("protected_terms_create=1", dry.stdout)
+            self.assertIn("protected_terms_add=1", dry.stdout)
+            self.assertFalse(protected.exists())
+            self.assertEqual(replacements.read_text(encoding="utf-8"), before_replacements)
+            imported = subprocess.run(command, text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False)
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            document = json.loads(protected.read_text(encoding="utf-8"))
+            self.assertEqual(document["schema_version"], 1)
+            self.assertEqual(len(document["entries"]), 1)
+            entry = document["entries"][0]
+            self.assertEqual(entry["target_section"], "Transcription")
+            self.assertEqual(entry["term"], "normalword")
+            self.assertIn("protected_term_action=add", entry["reason"])
+            self.assertEqual(entry["source_candidate_id"], row["candidate_id"])
+            self.assertEqual(replacements.read_text(encoding="utf-8"), before_replacements)
+            self.assertFalse(scope.exists())
+            repeated = subprocess.run(command + ["--dry-run"], text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False)
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertIn("protected_terms_add=0", repeated.stdout)
+            self.assertIn("protected_terms_duplicate=1", repeated.stdout)
+
+    def test_blank_action_does_not_create_missing_protected_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            make_recording(recordings, "20260814-100000-024", **{
+                "transcription_text.txt": "normalword", "transcription_processed_text.txt": "canonical",
+                "prompt_correction_text.txt": "same", "output_text.txt": "same",
+            })
+            replacements = root / "global_replacements.json"
+            write_json(replacements, empty_replacements())
+            proposals = root / "agent_proposals.json"
+            write_proposals(proposals, [{
+                "recording": "20260814-100000-024", "target_section": "Transcription",
+                "source_text": "normalword", "source_or_pattern": "normalword", "replacement": "canonical",
+                "protected_term_action": "add", "reason": "Agent must not control protected terms",
+            }])
+            refinement = root / "refinement.md"
+            self.assertEqual(run_build(recordings, replacements, refinement, "--proposals", str(proposals)).returncode, 0)
+            self.assertIn("| review_required |  | normalword |", refinement.read_text(encoding="utf-8"))
+            text = refinement.read_text(encoding="utf-8").replace("<!-- replacement_mode: pending -->", "<!-- replacement_mode: mixed -->").replace("<!-- target_file: -->", "<!-- target_file: global_replacements.json -->")
+            refinement.write_text(text, encoding="utf-8")
+            update_first_candidate(refinement, replacement_mode="mixed", target_file="global_replacements.json")
+            protected = root / "global_replacements.protected_terms.json"
+            result = subprocess.run(
+                [sys.executable, str(IMPORT), "--refinement", str(refinement), "--replacements", str(replacements), "--mode", "mixed", "--scope-file", str(root / "scope.json"), "--protected-terms", str(protected)],
+                text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(protected.exists())
+
+    def test_protected_action_rejects_regex_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            make_recording(recordings, "20260814-100000-025", **{
+                "transcription_text.txt": "badword", "transcription_processed_text.txt": "goodword",
+                "prompt_correction_text.txt": "same", "output_text.txt": "same",
+            })
+            replacements = root / "global_replacements.json"
+            write_json(replacements, empty_replacements())
+            before = replacements.read_text(encoding="utf-8")
+            proposals = root / "agent_proposals.json"
+            write_proposals(proposals, [{
+                "recording": "20260814-100000-025", "target_section": "Transcription",
+                "source_text": "badword", "source_or_pattern": "bad.*", "replacement": "goodword",
+                "rule_type": "Regex", "reason": "Regex proposal",
+            }])
+            refinement = root / "refinement.md"
+            self.assertEqual(run_build(recordings, replacements, refinement, "--proposals", str(proposals)).returncode, 0)
+            text = refinement.read_text(encoding="utf-8").replace("<!-- replacement_mode: pending -->", "<!-- replacement_mode: mixed -->").replace("<!-- target_file: -->", "<!-- target_file: global_replacements.json -->")
+            refinement.write_text(text, encoding="utf-8")
+            update_first_candidate(refinement, review_status="rejected", protected_term_action="add", replacement_mode="mixed", target_file="global_replacements.json")
+            protected = root / "global_replacements.protected_terms.json"
+            result = subprocess.run(
+                [sys.executable, str(IMPORT), "--refinement", str(refinement), "--replacements", str(replacements), "--mode", "mixed", "--scope-file", str(root / "scope.json"), "--protected-terms", str(protected)],
+                text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires rule_type=Literal", result.stderr)
+            self.assertFalse(protected.exists())
+            self.assertEqual(replacements.read_text(encoding="utf-8"), before)
+
+    def test_protected_action_requires_rejected_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            make_recording(recordings, "20260814-100000-027", **{
+                "transcription_text.txt": "normalword", "transcription_processed_text.txt": "canonical",
+                "prompt_correction_text.txt": "same", "output_text.txt": "same",
+            })
+            replacements = root / "global_replacements.json"
+            write_json(replacements, empty_replacements())
+            proposals = root / "agent_proposals.json"
+            write_proposals(proposals, [{
+                "recording": "20260814-100000-027", "target_section": "Transcription",
+                "source_text": "normalword", "source_or_pattern": "normalword", "replacement": "canonical",
+                "reason": "Status gate",
+            }])
+            refinement = root / "refinement.md"
+            self.assertEqual(run_build(recordings, replacements, refinement, "--proposals", str(proposals)).returncode, 0)
+            original = refinement.read_text(encoding="utf-8")
+            protected = root / "global_replacements.protected_terms.json"
+            for status in ("pending", "review_required", "approved"):
+                text = original.replace("<!-- replacement_mode: pending -->", "<!-- replacement_mode: mixed -->").replace("<!-- target_file: -->", "<!-- target_file: global_replacements.json -->")
+                refinement.write_text(text, encoding="utf-8")
+                update_first_candidate(refinement, review_status=status, protected_term_action="add", replacement_mode="mixed", target_file="global_replacements.json")
+                result = subprocess.run(
+                    [sys.executable, str(IMPORT), "--refinement", str(refinement), "--replacements", str(replacements), "--mode", "mixed", "--scope-file", str(root / "scope.json"), "--protected-terms", str(protected)],
+                    text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("requires review_status=rejected", result.stderr)
+                self.assertFalse(protected.exists())
+
+    def test_protected_action_conflicts_with_existing_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings = root / "recordings"
+            recordings.mkdir()
+            make_recording(recordings, "20260814-100000-026", **{
+                "transcription_text.txt": "normalword", "transcription_processed_text.txt": "canonical",
+                "prompt_correction_text.txt": "same", "output_text.txt": "same",
+            })
+            replacements = root / "global_replacements.json"
+            document = empty_replacements()
+            document["Transcription"]["Literals"] = {"canonical": ["normalword"]}
+            write_json(replacements, document)
+            before = replacements.read_text(encoding="utf-8")
+            proposals = root / "agent_proposals.json"
+            write_proposals(proposals, [{
+                "recording": "20260814-100000-026", "target_section": "Transcription",
+                "source_text": "normalword", "source_or_pattern": "normalword", "replacement": "canonical",
+                "reason": "Existing mapping",
+            }])
+            refinement = root / "refinement.md"
+            self.assertEqual(run_build(recordings, replacements, refinement, "--proposals", str(proposals)).returncode, 0)
+            text = refinement.read_text(encoding="utf-8").replace("<!-- replacement_mode: pending -->", "<!-- replacement_mode: mixed -->").replace("<!-- target_file: -->", "<!-- target_file: global_replacements.json -->")
+            refinement.write_text(text, encoding="utf-8")
+            update_first_candidate(refinement, review_status="rejected", protected_term_action="add", replacement_mode="mixed", target_file="global_replacements.json")
+            protected = root / "global_replacements.protected_terms.json"
+            result = subprocess.run(
+                [sys.executable, str(IMPORT), "--refinement", str(refinement), "--replacements", str(replacements), "--mode", "mixed", "--scope-file", str(root / "scope.json"), "--protected-terms", str(protected)],
+                text=True, capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("conflicts", result.stderr)
+            self.assertFalse(protected.exists())
+            self.assertEqual(replacements.read_text(encoding="utf-8"), before)
 
 
 if __name__ == "__main__":

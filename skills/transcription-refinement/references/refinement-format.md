@@ -9,11 +9,24 @@
 3. 接著看「模型稽核」，確認候選來自哪些 STT／校正模型。
 4. 最後看「匯入路由與系統稽核」，確認批次模式與完整性資訊。
 
+## 批次選取 metadata
+
+表格前會以 HTML comment 保存本批次的選取範圍：
+
+```text
+<!-- selection_mode: count|all -->
+<!-- selected_count: 10 -->
+<!-- selected_from: 20260818-003715-313 -->
+<!-- selected_to: 20260818-164727-144 -->
+```
+
+`selected_from` 是實際選取的最早一筆 Recording，`selected_to` 是最晚一筆；這些值只描述選取與稽核，不影響候選、驗證或匯入。`selection_mode=count` 代表最新 N 筆，`selection_mode=all` 代表套用 `--since`／`--until` 後的全部資料夾。
+
 ## 欄位分組
 
 | 群組 | 欄位 |
 | --- | --- |
-| 提議與審核 | candidate_id、target_section、recording、timestamp、replacement_risk、protected_term_match、review_status、source_text、source_or_pattern、replacement、rule_type、reason |
+| 提議與審核 | candidate_id、target_section、recording、timestamp、replacement_risk、protected_term_match、review_status、protected_term_action、source_text、source_or_pattern、replacement、rule_type、reason |
 | 下游驗證 | evidence_status、downstream_observed、validation_status、validation_note |
 | 模型稽核 | transcription_engine、transcription_model、correction_model、model_profile、model_evidence |
 | 匯入路由與系統稽核 | replacement_mode、target_file、proposal_fingerprint、review_stage、remark |
@@ -29,6 +42,7 @@
 | replacement_risk | 協助人工排序的來源詞風險分類，不是信心度 | Agent | none、common_term、rare_or_domain、context_sensitive、unknown（舊提議缺欄位時） | 可補充但應重新審核 | 非 approved 不可匯入；不會自動淘汰候選 |
 | protected_term_match | 顯示 Literal 是否命中不可替換詞表 | 建置腳本／Importer 即時複查 | matched、not_matched、not_applicable、not_checked | 僅可加註 | matched 或 not_checked 需人工明確決定 |
 | review_status | 人工審核狀態 | 使用者 | pending、review_required、approved、rejected | 使用者唯一可設定者 | 只有 approved 才可匯入 |
+| protected_term_action | rejected Literal 候選的不可替換詞表動作 | 使用者；Agent 不得預先填入 | 空白或精確值 `add` | 使用者可填寫 | `add` 必須搭配 rejected + Literal；正式匯入時加入 protected terms |
 | source_text | replacement 前的原始上下文 | Agent proposal | 非空字串 | 可改但會影響完整性檢查 | 參與 fingerprint；供人工理解 |
 | source_or_pattern | Literal 來源或 Regex Pattern | Agent proposal | 非空字串 | 可改但會影響匯入 | 決定寫入的來源／Pattern |
 | replacement | 建議寫入的 canonical 文字 | Agent proposal | 非空字串 | 可改但會影響匯入 | 決定寫入的 Replacement |
@@ -58,7 +72,7 @@
 
 | 欄位 | 用途 | 產生者／擁有者 | 格式或允許值 | 可人工修改 | Importer 影響 |
 | --- | --- | --- | --- | --- | --- |
-| replacement_mode | 指定本批次的匯入範圍 | 初始由建置腳本設為 pending；使用者選擇模式 | pending、mixed、separate | 使用者選擇 | 必須與 CLI 和 batch metadata 一致 |
+| replacement_mode | 指定本批次的匯入範圍 | 初始由建置腳本設為 pending；使用者選擇模式 | pending、mixed、separate | 使用者按批次選擇一次；各列為鏡像值 | 必須與 CLI 和 batch metadata 一致 |
 | target_file | 指定實際 replacement 檔案 | 使用者／批次路由 | 檔案路徑；pending 時可為空 | 使用者設定 | 必須與 CLI 相符 |
 | proposal_fingerprint | 防止 proposal 欄位被驗證流程靜默改寫 | 建置腳本 | 64 位小寫 SHA-256 hex；由 target section、rule type、source、pattern、replacement、reason 計算 | 不應修改 | mismatch 需人工確認；不改變 replacement 值 |
 | review_stage | 指示候選所屬證據階段 | 建置腳本 | STT、PromptCorrection | 不應修改 | 不決定寫入區塊；以 target_section 為準 |
@@ -69,6 +83,8 @@
 - target_section 決定 replacement 寫入哪個 section；review_stage 只描述證據階段。
 - review_status 決定是否能進入 Importer；validation_status 只描述驗證結果。`review_required` 永遠不可直接匯入。
 - `replacement_risk` 是 Agent 的風險標籤；`protected_term_match` 是詞表命中狀態。兩者都不代表自動拒絕。
+- `protected_term_action` 是人工後續動作，不是 Agent 提議內容；只有 rejected + Literal 且明確填寫 `add` 才會加入詞表。
+- protected terms 檔案不存在時，dry-run 只顯示預計建立；第二次確認的正式匯入才建立 `schema_version=1` 的空表並加入詞項。
 - `protected_term_match=matched` 表示該 Literal source 位於工作區的 `global_replacements.protected_terms.json`；正式核准匯入後會移除該保護項。
 - candidate_id 是人工定位用；proposal_fingerprint 是完整性檢查用。
 - 下游欄位可以補充驗證資訊，但不得取代 source_text、source_or_pattern、replacement 或 reason。

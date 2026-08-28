@@ -805,6 +805,9 @@ def main() -> int:
                 "rule_type": proposal["rule_type"],
                 "reason": proposal["reason"],
                 "review_status": review_status,
+                # Protected-term additions are an operator-only action.  Never
+                # copy a request from Agent proposal JSON into the review table.
+                "protected_term_action": "",
                 "evidence_status": evidence_status,
                 "downstream_observed": downstream_observed,
                 "validation_status": validation_status,
@@ -827,20 +830,27 @@ def main() -> int:
             correction_model_candidate_counts[metadata.correction_model] += 1
         review_records.add(recording.name)
 
+    selected_from = recordings[-1].name
+    selected_to = recordings[0].name
+    selection_mode = "all" if args.all else "count"
     headers = (
         "candidate_id", "target_section", "recording", "timestamp", "replacement_risk", "protected_term_match",
-        "review_status", "source_text", "source_or_pattern", "replacement", "rule_type", "reason",
+        "review_status", "protected_term_action", "source_text", "source_or_pattern", "replacement", "rule_type", "reason",
         "evidence_status", "downstream_observed", "validation_status", "validation_note",
         "transcription_engine", "transcription_model", "correction_model", "model_profile", "model_evidence",
         "replacement_mode", "target_file", "proposal_fingerprint", "review_stage", "remark",
     )
     markdown = [
+        f"<!-- selection_mode: {selection_mode} -->",
+        f"<!-- selected_count: {len(recordings)} -->",
+        f"<!-- selected_from: {selected_from} -->",
+        f"<!-- selected_to: {selected_to} -->",
         "<!-- replacement_mode: pending -->",
         "<!-- target_file: -->",
         "<!-- proposal_source: agent_proposals.json; downstream files are validation only -->",
         "## 欄位分組（由左至右）",
         "",
-        "1. **提議與審核**：candidate_id、target_section、recording、timestamp、replacement_risk、protected_term_match、review_status、source_text、source_or_pattern、replacement、rule_type、reason。",
+        "1. **提議與審核**：candidate_id、target_section、recording、timestamp、replacement_risk、protected_term_match、review_status、protected_term_action、source_text、source_or_pattern、replacement、rule_type、reason。",
         "2. **下游驗證**：evidence_status、downstream_observed、validation_status、validation_note。",
         "3. **模型稽核**：transcription_engine、transcription_model、correction_model、model_profile、model_evidence。",
         "4. **匯入路由與系統稽核**：replacement_mode、target_file、proposal_fingerprint、review_stage、remark。",
@@ -854,8 +864,6 @@ def main() -> int:
         markdown.append("| " + " | ".join(escape_cell(row[key]) for key in headers) + " |")
     args.output.write_text("\n".join(markdown) + "\n", encoding="utf-8")
 
-    selected_from = recordings[-1].name
-    selected_to = recordings[0].name
     mixed_model_profiles = len(model_record_counts) > 1
     print(
         f"selected={len(recordings)} selected_from={selected_from} selected_to={selected_to} "

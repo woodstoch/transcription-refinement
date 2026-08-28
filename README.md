@@ -48,11 +48,38 @@ npx skills remove transcription-refinement --yes
 
 ## 最新版行為
 
-- `Transcription` 候選只來自 `transcription_text.txt`；`FinalOutput` 候選只來自 `prompt_correction_text.txt`。
-- `transcription_processed_text.txt`、`output_text.txt` 與既有 replacement 只提供驗證、duplicate 與 conflict 註記。
+- `Transcription` 候選只來自 replacement 前的 `transcription_text.txt`；`FinalOutput` 候選只來自 replacement 前的 `prompt_correction_text.txt`。
+- `transcription_processed_text.txt`、`output_text.txt` 與既有 replacement 只提供非破壞性驗證、duplicate 與 conflict 註記；下游差異不得覆蓋或刪除 Agent 候選。
+- 缺少 downstream 檔案不會刪除候選；只有缺少該 stage 的原始來源時，該 stage 才無法建立候選。
 - 建置後的 `refinement.md` 表格前會保存 `selection_mode`、`selected_count`、`selected_from`、`selected_to`，Chat 摘要也應顯示相同範圍。
-- `review_status` 是逐列人工決定；`replacement_mode` 是整批一次選擇的 `mixed` 或 `separate`。完整欄位定義請見 [`references/refinement-format.md`](skills/transcription-refinement/references/refinement-format.md)。
+- `review_status` 是逐列人工決定；`replacement_mode` 是整批一次選擇的 `mixed` 或 `separate`。完整欄位定義請見 [`skills/transcription-refinement/references/refinement-format.md`](skills/transcription-refinement/references/refinement-format.md)。
+- `replacement_risk` 只是人工排序提示，不是 confidence，也不會自動淘汰候選。
 - protected terms 不需要先手動初始化；只有使用者在 `rejected` 的 Literal 列填入 `protected_term_action=add`，正式確認匯入時才會建立或更新詞表。
+- `global_replacements.scope.json` 與 protected terms 檔案是 Skill 的稽核 sidecar，不會成為 ZeroType replacement JSON 的內容。
+
+### 兩個 replacement stage
+
+| 目標 section | Agent 候選來源 | downstream 驗證 | 寫入位置 |
+| --- | --- | --- | --- |
+| `Transcription` | `transcription_text.txt` | `transcription_processed_text.txt` | `Transcription` |
+| `FinalOutput` | `prompt_correction_text.txt` | `output_text.txt` | `FinalOutput` |
+
+Agent 先分析左欄原始文字並寫入 `agent_proposals.json`；建置器再把提議與證據、模型及稽核資訊合併成 `refinement.md`。不提供 `--proposals` 時只建立 inventory，絕不從下游差異自行發明 replacement。
+
+### `refinement.md` 批次標頭
+
+建置器會保留實際選取範圍，格式如下：
+
+```text
+<!-- selection_mode: count -->
+<!-- selected_count: 10 -->
+<!-- selected_from: 20260818-003715-313 -->
+<!-- selected_to: 20260818-164727-144 -->
+<!-- replacement_mode: pending -->
+<!-- target_file: -->
+```
+
+`selected_from` 是本批次最早選取的 Recording，`selected_to` 是最晚選取的 Recording；兩者是實際資料夾邊界，不代表中間每個時間戳都有錄音。
 
 ## 一般使用流程
 
@@ -103,6 +130,13 @@ scope sidecar：<SCOPE_FILE>
 
 `model_profile` 只在 `separate` 模式需要。第二次確認前不得移除 `--dry-run`。
 
+### 舊版 Recording 與模型資訊
+
+- 原始文字缺少時，Skill 依自身文件的 response/history fallback 讀取；不會用現有 replacement 反推缺失文字。
+- 缺少 `transcription_processed_text.txt` 或 `output_text.txt` 時，候選仍保留，並在 `evidence_status`／`validation_status` 標示缺少 downstream 證據。
+- STT、Whisper 與 AI 校正模型從該筆 Recording 的 request/response metadata 解析；不以目前 `appsettings.Local.json` 猜測歷史模型。
+- 多個 `model_profile` 會在 Chat 與 dry-run 顯示 `mixed_model_profiles` 提醒；模型資訊只用於人工稽核與 separate routing，不會寫入 replacement JSON。
+
 ## 常規整理到匯入範例
 
 以下是最常見的 mixed 流程。每一步都是獨立的使用者決定；Agent 不會因為完成上一階段就自動匯入。
@@ -119,17 +153,20 @@ scope sidecar：<SCOPE_FILE>
 
 Agent 應完成來源分析與非破壞性驗證，並回報 `refinement.md`。如果沒有候選，流程在此結束；不需要為了完成流程而執行匯入。
 
+整理回覆至少要列出：`selected_count`、`selected_from`、`selected_to`、full/partial/missing evidence、缺少的核心檔案／音訊、各 `model_profile`、`Transcription`／`FinalOutput` 統計，以及 duplicate、conflict、cross-model scope 警告。
+
 ### 第二步：人工審核候選
 
 使用者檢查 `refinement.md`，必要時要求回聽指定 Recording，修改候選內容，並將每列設為 `approved` 或 `rejected`。`common_term`、`rare_or_domain`、`context_sensitive` 或命中不可替換詞表的列會先標為 `review_required`；它們仍完整保留，只有使用者決定後才改成 `approved`／`rejected`。尚未決定的列保留 `pending` 或 `review_required`，Importer 會忽略它們。
 
 若使用者判定某個 Literal 來源詞本身不可被 replacement，先將候選設為 `rejected`，再在同一列將 `protected_term_action` 填為精確值 `add`：
 
-```bash
+```text
+review_status=rejected
 protected_term_action=add
 ```
 
-詞表只保存依 `target_section` 區分的 Literal；`entries[].term` 是受保護字詞。命中時 `refinement.md` 的 `protected_term_match` 會顯示 `matched`。dry-run 只預覽建立或加入；第二次確認後的正式匯入才會寫檔。若使用者之後仍核准同一個 replacement，正式匯入會同步移除該保護項。需要直接管理詞表時，才使用 `manage_protected_terms.py`。
+這是使用者後續動作，Agent proposal 不得預先填入。它只接受 `rejected` + `Literal` + 有效 `target_section` + 非空來源；任何不符合條件的 `add` 都會使整批停止。詞表只保存依 `target_section` 區分的 Literal；`entries[].term` 是受保護字詞。同 section、同 term 會採 idempotent 行為，不重複新增；與既有 replacement 衝突時會停止。命中時 `refinement.md` 的 `protected_term_match` 會顯示 `matched`。dry-run 只預覽建立或加入；第二次確認後的正式匯入才會寫檔。若使用者之後仍核准同一個 replacement，正式匯入會同步移除該保護項。需要直接管理詞表時，才使用 `manage_protected_terms.py`。
 
 ### 第三步：選擇 mixed 並執行 dry-run
 
@@ -137,12 +174,14 @@ protected_term_action=add
 
 ```text
 這批使用 mixed 模式，目標是 global_replacements.json。
-請在 refinement.md 設定 batch 與 approved rows routing，執行唯讀 dry-run，
+我已逐列完成 review_status；請在 refinement.md 的 batch metadata 設定 replacement_mode=mixed 與 target_file=global_replacements.json，並同步 approved rows routing，執行唯讀 dry-run，
 回報 Transcription、FinalOutput 的新增、duplicate、conflict 與模型 scope 警告。
 不要正式匯入。
 ```
 
 Agent 應先檢查 routing、結構及 approved rows，再顯示 dry-run 結果。此時 `global_replacements.json` 與 scope sidecar 都不得被修改。
+
+若有 protected-term 請求，dry-run 另列出 `protected_terms_file_missing`、`protected_terms_create`、`protected_terms_add`、duplicate 與 conflict；即使詞表不存在，也只預覽，不會建立檔案。
 
 ### 第四步：第二次確認後正式匯入
 
@@ -189,6 +228,8 @@ python3 "$SKILL_ROOT/scripts/build_refinement.py" \
 匯入前必須完成以下準備：
 
 - 使用者已將候選設為 `approved` 或 `rejected`；Importer 只讀取 `approved` rows。
+- `review_required` 是人工審核提示，不是信心度；候選不會因 evidence、conversionChanged、duplicate 或 conflict 被自動刪除。
+- `protected_term_action` 只有在使用者明確填入 `add` 時才會處理，且必須搭配 `rejected` + `Literal`。
 - `review_status` 是逐列欄位；`replacement_mode` 與 `target_file` 是整批 routing 設定，表格列值必須與表頭及 CLI 一致。
 - `refinement.md` 包含正確的 batch routing 註解：
 
